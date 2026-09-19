@@ -535,6 +535,21 @@ def render_coverage_tab(coverage: pd.DataFrame, scored: pd.DataFrame, source: st
     st.bar_chart(coverage.set_index("trigger")["lift"])
 
 
+@st.cache_resource(show_spinner="Scoring the note reader...")
+def note_reader_scores():
+    """Cross-validated corpus performance and held-out contrast-pair performance."""
+    from src.engine.note_eval import (
+        evaluate_on_contrast,
+        evaluate_sentence_classifier,
+    )
+
+    classifier = ClinicalNoteReader().classifier
+    return (
+        evaluate_sentence_classifier(classifier, "tfidf + logistic"),
+        evaluate_on_contrast(classifier, "tfidf + logistic"),
+    )
+
+
 def render_note_reader_tab(reader: Optional[ClinicalNoteReader], source: str) -> None:
     if reader is None:
         st.info(
@@ -549,6 +564,37 @@ def render_note_reader_tab(reader: Optional[ClinicalNoteReader], source: str) ->
         "The reader classifies each sentence as unanticipated, known-risk, or neutral. It is a "
         "TF-IDF n-gram logistic regression trained on a hand-labeled sentence corpus, paired "
         "with a negation-aware pass so a ruled-out finding does not read as a real one."
+    )
+
+    corpus_report, contrast_report = note_reader_scores()
+    st.markdown("**How well it actually does**")
+    a, b, c = st.columns(3)
+    a.metric(
+        "Macro F1, cross-validated",
+        f"{corpus_report.macro_f1_mean:.2f}",
+        help=(
+            f"Stratified {corpus_report.n_folds}-fold over the {corpus_report.n_samples}-sentence "
+            f"training corpus. A majority guess scores {corpus_report.majority_baseline:.2f}."
+        ),
+    )
+    b.metric(
+        "Responds to framing",
+        f"{contrast_report.flip_rate:.0%}",
+        help=(
+            f"Share of {contrast_report.n_pairs} held-out pairs, each naming the same clinical "
+            "event under opposite framing, where the reader gives the two sentences different "
+            "answers. This is the behaviour the layer exists for."
+        ),
+    )
+    c.metric(
+        "Both sides right",
+        f"{contrast_report.both_correct_rate:.0%}",
+        help="Held-out pairs where the reader labelled both framings correctly, not just differently.",
+    )
+    st.caption(
+        "The corpus is 90 sentences, which is small for an n-gram model, and it shows: the reader "
+        "picks up framing on unseen prose far more often than it labels it correctly. Treat the "
+        "sentence classes as a lead, not a verdict."
     )
 
     left, right = st.columns(2)
