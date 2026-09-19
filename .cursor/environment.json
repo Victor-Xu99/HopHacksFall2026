@@ -1,0 +1,17 @@
+{
+  "name": "SafetyNet",
+  "install": "pip install --user -r requirements.txt",
+  "terminals": [
+    {
+      "name": "streamlit",
+      "command": "python3 -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true",
+      "description": "SafetyNet Streamlit web app (harm-event triage UI) served on port 8501."
+    }
+  ],
+  "ports": [
+    {
+      "name": "streamlit",
+      "port": 8501
+    }
+  ]
+}
