@@ -14,12 +14,19 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 import pandas as pd
-from sqlalchemy import create_engine
 
-from src.data.sql_store import DEFAULT_SERVER, connection_url
 from src.domain.models import PatientCase, PatientEvent
 
+DEFAULT_SERVER = r".\SQLEXPRESS"
 DEFAULT_DATABASE = "SafetyHops"
+DRIVER = "ODBC Driver 17 for SQL Server"
+
+
+def _connection_url(server: str, database: str) -> str:
+    return (
+        f"mssql+pyodbc://@{server}/{database}"
+        f"?driver={DRIVER.replace(' ', '+')}&trusted_connection=yes"
+    )
 
 # Chronic / routine conditions stay unlabeled. These ten are the harm archetypes
 # planted in this synthetic warehouse.
@@ -43,7 +50,8 @@ READMISSION_WINDOW_DAYS = 30
 
 def hops_available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) -> bool:
     try:
-        engine = create_engine(connection_url(server, database))
+        from sqlalchemy import create_engine  # noqa: PLC0415
+        engine = create_engine(_connection_url(server, database))
         with engine.connect() as connection:
             return connection.exec_driver_sql("SELECT OBJECT_ID('dbo.encounters', 'U')").scalar() is not None
     except Exception:
@@ -78,7 +86,8 @@ def load_safetyhops_cases(
             "The warehouse on this machine is `SafetyHops` (with an s)."
         )
 
-    engine = create_engine(connection_url(server, database))
+    from sqlalchemy import create_engine  # noqa: PLC0415
+    engine = create_engine(_connection_url(server, database))
     try:
         patients = _read(engine, "patients", "Id, BIRTHDATE, GENDER")
         encounters = _read(engine, "encounters", "Id, START, STOP, PATIENT, ENCOUNTERCLASS, DESCRIPTION")
