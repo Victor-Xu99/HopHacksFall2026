@@ -177,6 +177,7 @@ CORE_DDL: Tuple[str, ...] = (
         label_source    NVARCHAR(64)  NULL,
         scenario        NVARCHAR(128) NULL,
         loaded_at       DATETIME2(3)  NOT NULL CONSTRAINT df_cases_loaded_at DEFAULT SYSUTCDATETIME(),
+        discharged_at   DATETIME2(3)  NULL,
         CONSTRAINT uq_cases_source_case UNIQUE (source, source_case_id)
     )
     """,
@@ -251,6 +252,12 @@ def ensure_core_schema(engine: Engine) -> None:
     with engine.begin() as connection:
         for statement in CORE_DDL:
             connection.execute(text(statement))
+        connection.execute(
+            text(
+                "IF COL_LENGTH('core.cases', 'discharged_at') IS NULL "
+                "ALTER TABLE core.cases ADD discharged_at DATETIME2(3) NULL"
+            )
+        )
         for name, table, columns in CORE_INDEXES:
             connection.execute(
                 text(
@@ -274,7 +281,8 @@ CREATE TABLE #case_stage (
     gender         NVARCHAR(16)  NULL,
     label          BIT           NULL,
     label_source   NVARCHAR(64)  NULL,
-    scenario       NVARCHAR(128) NULL
+    scenario       NVARCHAR(128) NULL,
+    discharged_at  DATETIME2(3)  NULL
 )
 """
 
@@ -289,12 +297,13 @@ WHEN MATCHED THEN UPDATE SET
     label          = incoming.label,
     label_source   = incoming.label_source,
     scenario       = incoming.scenario,
+    discharged_at  = incoming.discharged_at,
     loaded_at      = SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT
-    (source, source_case_id, source_ordinal, age, gender, label, label_source, scenario)
+    (source, source_case_id, source_ordinal, age, gender, label, label_source, scenario, discharged_at)
     VALUES (incoming.source, incoming.source_case_id, incoming.source_ordinal,
             incoming.age, incoming.gender, incoming.label, incoming.label_source,
-            incoming.scenario);
+            incoming.scenario, incoming.discharged_at);
 """
 
 _DELETE_STALE_EVENTS = """
@@ -352,6 +361,7 @@ def _case_rows(cases: Sequence[PatientCase]) -> List[tuple]:
             1 if case.is_harm_event else 0,
             case.label_source,
             case.scenario,
+            datetime.fromisoformat(case.discharged_at) if case.discharged_at else None,
         )
         for ordinal, case in enumerate(cases)
     ]
@@ -402,7 +412,7 @@ def write_cases(
         cursor.execute(_STAGE_DDL)
         _executemany(
             cursor,
-            "INSERT INTO #case_stage VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO #case_stage VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             _case_rows(cases),
             batch_size,
         )
@@ -433,6 +443,7 @@ def read_cases(
     """Rebuild PatientCase objects from the canonical layer, in the order they were written."""
     owns_engine = engine is None
     engine = engine or build_engine()
+    ensure_core_schema(engine)
     filter_clause = "WHERE c.source = :source" if source is not None else ""
     parameters = {"source": source} if source is not None else {}
 
@@ -441,7 +452,7 @@ def read_cases(
             case_rows = connection.execute(
                 text(
                     "SELECT c.case_key, c.source_case_id, c.age, c.gender, c.label, "
-                    f"c.label_source, c.scenario FROM core.cases AS c {filter_clause} "
+                    f"c.label_source, c.scenario, c.discharged_at FROM core.cases AS c {filter_clause} "
                     "ORDER BY c.source, c.source_ordinal, c.case_key"
                 ),
                 parameters,
@@ -473,7 +484,7 @@ def read_cases(
         )
 
     cases: List[PatientCase] = []
-    for case_key, source_case_id, age, gender, label, label_source, scenario in case_rows:
+    for case_key, source_case_id, age, gender, label, label_source, scenario, discharged_at in case_rows:
         cases.append(
             PatientCase(
                 patient_id=source_case_id,
@@ -485,9 +496,171 @@ def read_cases(
                 is_harm_event=bool(label),
                 scenario=scenario,
                 label_source=label_source,
+                discharged_at=discharged_at.isoformat() if discharged_at is not None else None,
             )
         )
     return cases
+
+
+def upsert_stays(
+    cases: Sequence[PatientCase],
+    source: str,
+    engine: Optional[Engine] = None,
+    batch_size: int = BATCH_SIZE,
+) -> int:
+    """Merge stay rows only. Timelines are left for append_events."""
+    if not cases:
+        return 0
+
+    owns_engine = engine is None
+    engine = engine or build_engine()
+    ensure_core_schema(engine)
+    connection = engine.raw_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.fast_executemany = True
+        cursor.execute(_STAGE_DDL)
+        _executemany(
+            cursor,
+            "INSERT INTO #case_stage VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            _case_rows(cases),
+            batch_size,
+        )
+        cursor.execute(_MERGE_CASES, source)
+        cursor.execute("DROP TABLE #case_stage")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+        if owns_engine:
+            engine.dispose()
+    return len(cases)
+
+
+def append_events(
+    cases: Sequence[PatientCase],
+    source: str,
+    engine: Optional[Engine] = None,
+    batch_size: int = BATCH_SIZE,
+) -> int:
+    """Insert events that are not already on the stay. Existing rows are left alone."""
+    if not cases:
+        return 0
+
+    owns_engine = engine is None
+    engine = engine or build_engine()
+    ensure_core_schema(engine)
+    connection = engine.raw_connection()
+    inserted = 0
+    try:
+        cursor = connection.cursor()
+        cursor.fast_executemany = True
+        cursor.execute(
+            "SELECT source_case_id, case_key FROM core.cases WHERE source = ?", source
+        )
+        keys = {row[0]: int(row[1]) for row in cursor.fetchall()}
+        missing = [case.patient_id for case in cases if case.patient_id not in keys]
+        if missing:
+            raise KeyError(f"{missing[0]!r} is not a case of source {source!r}")
+
+        cursor.execute(
+            "SELECT e.case_key, e.source_event_id, e.case_ordinal "
+            "FROM core.events AS e "
+            "JOIN core.cases AS c ON c.case_key = e.case_key "
+            "WHERE c.source = ?",
+            source,
+        )
+        seen: Dict[int, set] = {}
+        next_ordinal: Dict[int, int] = {}
+        for case_key, event_id, ordinal in cursor.fetchall():
+            case_key = int(case_key)
+            seen.setdefault(case_key, set()).add(event_id)
+            next_ordinal[case_key] = max(next_ordinal.get(case_key, -1), int(ordinal))
+
+        rows = []
+        for case in cases:
+            case_key = keys[case.patient_id]
+            known = seen.setdefault(case_key, set())
+            ordinal = next_ordinal.get(case_key, -1)
+            for patient_event in case.events:
+                if patient_event.event_id in known:
+                    continue
+                ordinal += 1
+                known.add(patient_event.event_id)
+                rows.append(
+                    (
+                        case_key,
+                        ordinal,
+                        patient_event.event_id,
+                        patient_event.event_type,
+                        datetime.fromisoformat(patient_event.timestamp),
+                        patient_event.value,
+                        patient_event.details,
+                    )
+                )
+        if rows:
+            cursor.setinputsizes(_EVENT_INPUT_SIZES)
+            _executemany(cursor, _INSERT_EVENTS, rows, batch_size)
+            inserted = len(rows)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+        if owns_engine:
+            engine.dispose()
+    return inserted
+
+
+def discharged_unscored_ids(source: str, engine: Optional[Engine] = None) -> List[str]:
+    """Stay ids that have a discharge time and have never been scored."""
+    owns_engine = engine is None
+    engine = engine or build_engine()
+    ensure_core_schema(engine)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT c.source_case_id FROM core.cases AS c "
+                    "WHERE c.source = :source AND c.discharged_at IS NOT NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM core.scores AS s WHERE s.case_key = c.case_key) "
+                    "ORDER BY c.discharged_at"
+                ),
+                {"source": source},
+            ).fetchall()
+    finally:
+        if owns_engine:
+            engine.dispose()
+    return [row[0] for row in rows]
+
+
+def stay_census(source: str, engine: Optional[Engine] = None) -> Dict[str, int]:
+    owns_engine = engine is None
+    engine = engine or build_engine()
+    ensure_core_schema(engine)
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT "
+                    "COUNT(*) AS total, "
+                    "SUM(CASE WHEN discharged_at IS NULL THEN 1 ELSE 0 END) AS in_house, "
+                    "SUM(CASE WHEN discharged_at IS NOT NULL THEN 1 ELSE 0 END) AS discharged "
+                    "FROM core.cases WHERE source = :source"
+                ),
+                {"source": source},
+            ).one()
+    finally:
+        if owns_engine:
+            engine.dispose()
+    return {
+        "total": int(row[0] or 0),
+        "in_house": int(row[1] or 0),
+        "discharged": int(row[2] or 0),
+    }
 
 
 # ------------------------------------------------------------------ scores, reviews

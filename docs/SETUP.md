@@ -121,6 +121,17 @@ npm run dev
 
 Open http://localhost:5173. Vite proxies `/api` to the FastAPI server.
 
+## 7. Hospital extract (rank after discharge)
+
+See [HOSPITAL_EXTRACT.md](HOSPITAL_EXTRACT.md). Four CSVs go into SafetyNet SQL.
+A stay is stored while `discharged` is blank and ranked only after that field is
+filled in.
+
+```bash
+python -m scripts.ingest_hospital --dir tests/fixtures/hospital/in_house
+python -m scripts.ingest_hospital --dir tests/fixtures/hospital/discharged
+```
+
 ## Troubleshooting
 
 **A new database does not appear in SSMS.** Object Explorer caches the tree and

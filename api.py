@@ -1,7 +1,15 @@
-from fastapi import FastAPI, HTTPException, Query
+import tempfile
+from pathlib import Path
+from typing import List
+
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.service import list_sources, review_payload, trained_model, load_bundle
+from src.data.hospital_adapt import write_bundle
+from src.data.hospital_extract import ingest_and_rank, ingest_extract
+from src.data.sql_store import available as sql_available
+from src.data.sql_store import stay_census
+from src.service import SOURCE_HOSPITAL, list_sources, load_bundle, review_payload, trained_model
 
 app = FastAPI(title="SafetyNet API")
 app.add_middleware(
@@ -44,3 +52,60 @@ def warmup(source: str = Query("safetyhops"), model_type: str = Query("logistic"
     load_bundle(source)
     trained_model(source, model_type)
     return {"ready": True}
+
+
+@app.get("/api/hospital/status")
+def hospital_status():
+    if not sql_available():
+        raise HTTPException(status_code=400, detail="SafetyNet SQL is not reachable.")
+    return stay_census(SOURCE_HOSPITAL)
+
+
+@app.post("/api/hospital/ingest")
+def hospital_ingest(
+    directory: str = Query(..., description="Folder with stays.csv, labs.csv, meds.csv, transfers.csv"),
+    rank: bool = Query(True),
+    model_type: str = Query("logistic"),
+):
+    if not sql_available():
+        raise HTTPException(status_code=400, detail="SafetyNet SQL is not reachable.")
+    path = Path(directory)
+    if not path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Folder not found: {directory}")
+    load_bundle.cache_clear()
+    trained_model.cache_clear()
+    try:
+        if rank:
+            return ingest_and_rank(path, model_type=model_type)
+        return ingest_extract(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/hospital/upload")
+async def hospital_upload(
+    files: List[UploadFile] = File(..., description="A zip or the CSVs from one folder"),
+    rank: bool = Query(True),
+    model_type: str = Query("logistic"),
+):
+    """Import one folder (as many CSVs) or one zip. Headers do not have to match ours."""
+    if not sql_available():
+        raise HTTPException(status_code=400, detail="SafetyNet SQL is not reachable.")
+    if not files:
+        raise HTTPException(status_code=400, detail="Upload a folder of CSVs or one zip.")
+    folder = Path(tempfile.mkdtemp(prefix="safetynet_extract_"))
+    try:
+        payload = [(item.filename or "upload.csv", await item.read()) for item in files]
+        unpacked = write_bundle(folder, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    load_bundle.cache_clear()
+    trained_model.cache_clear()
+    try:
+        if rank:
+            return ingest_and_rank(unpacked, model_type=model_type)
+        return ingest_extract(unpacked)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -1,10 +1,15 @@
+import logging
+import tempfile
 from collections import Counter
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
 from src.data.generator import generate_dataset
+from src.data.hospital_adapt import write_bundle
+from src.data.hospital_extract import HOSPITAL_SOURCE, ingest_and_rank
 from src.data.mimic import MIMIC_ROOT_DEFAULT, load_mimic_cases, mimic_available
 from src.data.safetyhops import hops_available, load_safetyhops_cases
 from src.data.sql_store import available as sql_available
@@ -15,12 +20,14 @@ from src.engine.nlp_reader import ClinicalNoteReader
 from src.engine.watcher import StructuredDataWatcher
 
 st.set_page_config(page_title="SafetyNet", layout="wide")
+logger = logging.getLogger(__name__)
 
 SYNTHETIC = "Synthetic cohort"
 MIMIC = "MIMIC-IV demo (real records)"
 SQL_MIMIC = "MIMIC-IV demo (SQL Server)"
 SQL_SYNTHETIC = "Synthetic cohort (SQL Server)"
 SAFETYHOPS = "SafetyHops (SQL Server)"
+HOSPITAL = "Hospital extract (upload CSVs)"
 
 # Sidebar label -> the `source` tag the cohort carries in core.cases. Everything
 # read through here arrives as the same PatientCase objects as the CSV path, so
@@ -36,6 +43,7 @@ LABEL_NAMES = {
     SQL_MIMIC: "coded complication",
     SQL_SYNTHETIC: "generator label",
     SAFETYHOPS: "condition-coded harm",
+    HOSPITAL: "not yet reviewed",
 }
 
 
@@ -55,6 +63,10 @@ def load_cases(source: str, num_cases: int, harm_ratio: float, hard_negative_rat
         cases = load_mimic_cases()
         # A whole admission is the unit here and coded procedures carry a date but
         # no time, so arrival is the honest baseline boundary.
+        return cases, StructuredDataWatcher(anchor="admission"), None
+
+    if source == HOSPITAL:
+        cases = [case for case in read_cases(HOSPITAL_SOURCE) if case.discharged_at]
         return cases, StructuredDataWatcher(anchor="admission"), None
 
     if source == SAFETYHOPS:
@@ -154,7 +166,7 @@ def render_timeline(case: PatientCase, limit: int = 12) -> None:
     if len(events) > limit:
         st.caption(f"Showing the last {limit}.")
     for event in events[-limit:]:
-        st.caption(f"{event.event_type.upper()} · {event.value} — {event.details}")
+        st.caption(f"{event.event_type.upper()} | {event.value} - {event.details}")
 
 
 def render_evidence(case: PatientCase, watcher, reader: Optional[ClinicalNoteReader], model) -> None:
@@ -168,14 +180,14 @@ def render_evidence(case: PatientCase, watcher, reader: Optional[ClinicalNoteRea
         st.markdown("**Signals raising the score**")
         if raising:
             for c in raising:
-                st.write(f"- {c.description} — `+{c.contribution:.2f}` (value {c.value:g})")
+                st.write(f"- {c.description} - `+{c.contribution:.2f}` (value {c.value:g})")
         else:
             st.write("None.")
 
         st.markdown("**Signals lowering the score**")
         if lowering:
             for c in lowering:
-                st.write(f"- {c.description} — `{c.contribution:.2f}` (value {c.value:g})")
+                st.write(f"- {c.description} - `{c.contribution:.2f}` (value {c.value:g})")
         else:
             st.write("None.")
 
@@ -224,7 +236,7 @@ def render_evidence(case: PatientCase, watcher, reader: Optional[ClinicalNoteRea
                         extras.append("deterioration wording: " + ", ".join(f.harm_terms))
                     if f.negated:
                         extras.append("negated")
-                    suffix = f" · {'; '.join(extras)}" if extras else ""
+                    suffix = f" | {'; '.join(extras)}" if extras else ""
                     st.caption(f"{badge.get(f.label, f.label)} ({f.probability:.0%}){suffix}")
             else:
                 st.write("No harm-adjacent language detected.")
@@ -284,7 +296,7 @@ def render_review_queue(scored: pd.DataFrame, watcher, reader, model, source: st
     )
     st.caption(caption)
     st.caption(
-        f"“Already tagged as harm” means the stay has a {label_name} in the dataset. "
+        f"\"Already tagged as harm\" means the stay has a {label_name} in the dataset. "
         "It does not mean a doctor missed something. It means the tag was already there, "
         "and we are checking whether the short list is full of those tagged stays."
     )
@@ -295,8 +307,8 @@ def render_review_queue(scored: pd.DataFrame, watcher, reader, model, source: st
 
     for _, row in flagged.iterrows():
         header = (
-            f"{row['case_id']} · age {row['age']}{row['gender']} · "
-            f"score {row['score']:.2f} · harm tag: {'yes' if row['label'] else 'no'}"
+            f"{row['case_id']} | age {row['age']}{row['gender']} | "
+            f"score {row['score']:.2f} | harm tag: {'yes' if row['label'] else 'no'}"
         )
         with st.expander(header):
             render_evidence(row["case_obj"], watcher, reader, model)
@@ -342,11 +354,11 @@ def render_model_tab(model, scored: pd.DataFrame, source: str) -> None:
 
     e, f, g, h = st.columns(4)
     e.metric(
-        "Cross-validated ROC AUC", f"{report.cv_roc_auc_mean:.3f} ± {report.cv_roc_auc_std:.3f}"
+        "Cross-validated ROC AUC", f"{report.cv_roc_auc_mean:.3f} +/- {report.cv_roc_auc_std:.3f}"
     )
     f.metric(
         "Cross-validated PR AUC",
-        f"{report.cv_average_precision_mean:.3f} ± {report.cv_average_precision_std:.3f}",
+        f"{report.cv_average_precision_mean:.3f} +/- {report.cv_average_precision_std:.3f}",
         help="The noisier of the two metrics when positives are scarce, so the spread matters.",
     )
     g.metric("Brier score", f"{report.brier:.3f}", help="Calibration error; lower is better.")
@@ -476,7 +488,7 @@ def render_note_reader_tab(reader: Optional[ClinicalNoteReader], source: str) ->
         st.info(
             f"The active dataset has no clinical notes, so the note reader is not part of the "
             f"model right now. The MIMIC-IV demo excludes free text by design; notes ship as a "
-            f"separate credentialed dataset. You can still exercise the reader below — it is "
+            f"separate credentialed dataset. You can still exercise the reader below - it is "
             f"trained on its own labeled corpus, independent of the cohort."
         )
         reader = ClinicalNoteReader()
@@ -536,6 +548,7 @@ def sidebar():
         cohorts = sql_cohorts()
         options = (
             [SYNTHETIC]
+            + ([HOSPITAL] if sql_available() else [])
             + ([SAFETYHOPS] if have_hops else [])
             + ([MIMIC] if have_mimic else [])
             + list(cohorts)
@@ -574,6 +587,47 @@ def sidebar():
                 "100 real de-identified patients, 275 admissions, labeled by ICD "
                 "complication-of-care codes. No clinical notes in this release."
             )
+        elif source == HOSPITAL:
+            st.caption(
+                "Upload one folder's CSVs (or a zip). SafetyNet guesses which file is stays, "
+                "labs, meds, and transfers from names and column headers. Ranking starts "
+                "only after a discharge time is present."
+            )
+            bundle = st.file_uploader(
+                "Hospital folder or zip",
+                type=["csv", "zip"],
+                accept_multiple_files=True,
+                key="hospital_bundle",
+            )
+            if st.button("Import folder", type="primary"):
+                if not bundle:
+                    st.error("Choose the CSVs from one folder, or one zip.")
+                else:
+                    try:
+                        with st.spinner("Importing into SafetyNet SQL and ranking new discharges. This can take a minute."):
+                            folder = Path(tempfile.mkdtemp(prefix="safetynet_extract_"))
+                            unpacked = write_bundle(
+                                folder, [(item.name, item.getvalue()) for item in bundle]
+                            )
+                            result = ingest_and_rank(unpacked)
+                        st.session_state["hospital_ingest"] = result
+                        st.session_state["hospital_ingest_error"] = None
+                        st.cache_resource.clear()
+                    except Exception as exc:
+                        logger.exception("Hospital CSV import failed")
+                        st.session_state["hospital_ingest_error"] = str(exc)
+            last = st.session_state.get("hospital_ingest")
+            err = st.session_state.get("hospital_ingest_error")
+            if err:
+                st.error(err)
+            if last:
+                st.success(
+                    f"Imported {last['stays_upserted']} stays - {last['in_house']} still in house, "
+                    f"{last['discharged']} discharged, {last['ranked']['scored']} newly ranked. "
+                    "Discharged stays should appear in the review list."
+                )
+                if last.get("mapping"):
+                    st.caption("Mapped files: " + str(last["mapping"].get("files", {})))
         elif source == SAFETYHOPS:
             st.caption(
                 "Synthetic encounters in SQL Server database `SafetyHops`: labs, meds, "
@@ -632,11 +686,31 @@ def main() -> None:
     )
 
     source, num_cases, harm_ratio, hard_negative_ratio, seed, model_type, queue = sidebar()
+    last_import = st.session_state.get("hospital_ingest")
+    if last_import and source == HOSPITAL:
+        st.success(
+            f"Last import stored {last_import['stays_upserted']} stays. "
+            f"{last_import['discharged']} have a discharge time and can be ranked. "
+            f"{last_import['in_house']} are still in house (not on the list yet)."
+        )
     cases, watcher, reader = load_cases(
         source, num_cases, harm_ratio, hard_negative_ratio, seed
     )
-    extractors = [watcher] if reader is None else [watcher, reader]
-    model = fit_model(cases, extractors, source, model_type, queue[2], len(cases))
+    if source == HOSPITAL and not cases:
+        st.info(
+            "No discharged stays yet. Use **Hospital extract (upload CSVs)** in the sidebar "
+            "and import stays.csv, labs.csv, meds.csv, and transfers.csv. "
+            "Sample files are in `tests/fixtures/hospital/in_house`."
+        )
+        return
+    if source == HOSPITAL:
+        train_cases, train_watcher, _ = load_cases(SYNTHETIC, 200, 0.2, 0.3, 7)
+        model = fit_model(
+            train_cases, [train_watcher], "hospital_ranker", model_type, queue[2], len(train_cases)
+        )
+    else:
+        extractors = [watcher] if reader is None else [watcher, reader]
+        model = fit_model(cases, extractors, source, model_type, queue[2], len(cases))
     scored = score_cohort(cases, model, source, model_type, queue[2])
     coverage = coverage_frame(cases, watcher, source)
 
@@ -650,6 +724,11 @@ def main() -> None:
         st.success(
             f"Scoring **{len(cases)} real admissions** from the MIMIC-IV clinical database demo, "
             f"read from {origin}. Structured signals only, since this release carries no free text."
+        )
+    elif source == HOSPITAL:
+        st.success(
+            f"Scoring **{len(cases)} discharged hospital stays** stored in SafetyNet SQL. "
+            "In-house stays are kept but not ranked until discharged is filled in."
         )
     elif source == SAFETYHOPS:
         st.success(

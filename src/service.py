@@ -11,10 +11,11 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.data.generator import generate_dataset
+from src.data.hospital_extract import HOSPITAL_SOURCE
 from src.data.mimic import load_mimic_cases, mimic_available
 from src.data.safetyhops import hops_available, load_safetyhops_cases
 from src.data.sql_store import available as sql_available
-from src.data.sql_store import read_cases, source_counts
+from src.data.sql_store import read_cases, source_counts, stay_census
 from src.domain.models import PatientCase
 from src.engine.model import HarmScoringModel
 from src.engine.nlp_reader import ClinicalNoteReader
@@ -25,6 +26,7 @@ SOURCE_MIMIC = "mimic"
 SOURCE_SAFETYHOPS = "safetyhops"
 SOURCE_SQL_MIMIC = "sql_mimic"
 SOURCE_SQL_SYNTHETIC = "sql_synthetic"
+SOURCE_HOSPITAL = HOSPITAL_SOURCE
 
 LABEL_NAMES = {
     SOURCE_SYNTHETIC: "generator label",
@@ -32,11 +34,18 @@ LABEL_NAMES = {
     SOURCE_SAFETYHOPS: "condition-coded harm",
     SOURCE_SQL_MIMIC: "coded complication",
     SOURCE_SQL_SYNTHETIC: "generator label",
+    SOURCE_HOSPITAL: "not yet reviewed",
 }
 
 
 def list_sources() -> List[Dict[str, Any]]:
+    hospital_ready = sql_available()
     sources = [
+        {
+            "id": SOURCE_HOSPITAL,
+            "label": "Hospital extract (rank after discharge)",
+            "available": hospital_ready,
+        },
         {
             "id": SOURCE_SYNTHETIC,
             "label": "Synthetic (generated in memory)",
@@ -90,12 +99,23 @@ def load_bundle(source: str) -> Tuple[Tuple[PatientCase, ...], StructuredDataWat
         has_notes = any(e.event_type == "note" for case in cases for e in case.events)
         reader = ClinicalNoteReader() if has_notes else None
         return cases, StructuredDataWatcher(), reader
+    if source == SOURCE_HOSPITAL:
+        cases = tuple(case for case in read_cases(SOURCE_HOSPITAL) if case.discharged_at)
+        return cases, StructuredDataWatcher(anchor="admission"), None
     cases = tuple(generate_dataset(num_cases=400, harm_ratio=0.15, hard_negative_ratio=0.35, seed=7))
     return cases, StructuredDataWatcher(), ClinicalNoteReader()
 
 
 @lru_cache(maxsize=16)
 def trained_model(source: str, model_type: str) -> HarmScoringModel:
+    # Hospital extracts have no training labels. Rank them with a model fit on
+    # the synthetic cohort, then apply it only to discharged stays.
+    if source == SOURCE_HOSPITAL:
+        train_cases, _, _ = load_bundle(SOURCE_SYNTHETIC)
+        watcher = StructuredDataWatcher(anchor="admission")
+        model = HarmScoringModel([watcher], model_type=model_type, threshold=0.4)
+        model.train(list(train_cases))
+        return model
     cases, watcher, reader = load_bundle(source)
     extractors = [watcher] if reader is None else [watcher, reader]
     model = HarmScoringModel(list(extractors), model_type=model_type, threshold=0.4)

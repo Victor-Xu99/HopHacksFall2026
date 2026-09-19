@@ -5,6 +5,7 @@ __pycache__/
 # so it does not also swallow src/data/.
 /data/
 *.csv
+!tests/fixtures/**/*.csv
 *.csv.gz
 *.zip
 raw_load.log

@@ -38,6 +38,8 @@ class PatientCase:
     scenario: str = "routine"
     # "synthetic" for generated cases, "hand_labeled" for reviewer-adjudicated ones.
     label_source: str = "synthetic"
+    # ISO timestamp when the stay ended. Empty means still in house; ranking waits.
+    discharged_at: Optional[str] = None
 
     def events_of_type(self, *event_types: str) -> List[PatientEvent]:
         return [e for e in self.events if e.event_type in event_types]
