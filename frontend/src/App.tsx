@@ -126,6 +126,40 @@ export default function App() {
         </div>
       </section>
 
+      {data?.report ? (
+        <section className="metrics">
+          <div className="metric">
+            <span>PR AUC (held out)</span>
+            <strong>{score(data.report.average_precision)}</strong>
+            <small>
+              {data.report.pr_lift.toFixed(2)}x the {pct(data.report.pr_baseline)} base rate
+            </small>
+          </div>
+          <div className="metric">
+            <span>PR AUC (cross-validated)</span>
+            <strong>
+              {score(data.report.cv_average_precision_mean)} ±{" "}
+              {data.report.cv_average_precision_std.toFixed(3)}
+            </strong>
+            <small>the number to trust when positives are scarce</small>
+          </div>
+          <div className="metric">
+            <span>ROC AUC (held out)</span>
+            <strong>{score(data.report.roc_auc)}</strong>
+            <small>always nulls at 0.500, so it flatters a rare-event model</small>
+          </div>
+          <div className="metric">
+            <span>Label prevalence</span>
+            <strong>{pct(data.report.positive_rate)}</strong>
+            <small>
+              {data.report.positive_rate > 0.3
+                ? "far denser than harm in a real hospital population"
+                : "also the PR AUC baseline"}
+            </small>
+          </div>
+        </section>
+      ) : null}
+
       <section className="layout">
         <div className="panel">
           <h2>Review list</h2>
