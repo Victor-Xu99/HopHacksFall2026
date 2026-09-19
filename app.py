@@ -1,7 +1,11 @@
+from collections import Counter
+from typing import List, Optional
+
 import pandas as pd
 import streamlit as st
 
 from src.data.generator import generate_dataset
+from src.data.mimic import MIMIC_ROOT_DEFAULT, load_mimic_cases, mimic_available
 from src.domain.models import PatientCase, PatientEvent
 from src.engine.model import HarmScoringModel
 from src.engine.nlp_reader import ClinicalNoteReader
@@ -9,49 +13,105 @@ from src.engine.watcher import StructuredDataWatcher
 
 st.set_page_config(page_title="SafetyNet", layout="wide")
 
+SYNTHETIC = "Synthetic cohort"
+MIMIC = "MIMIC-IV demo (real records)"
 
-@st.cache_resource(show_spinner="Generating cohort and fitting the scoring model...")
-def build_engine(
-    num_cases: int,
-    harm_ratio: float,
-    hard_negative_ratio: float,
-    model_type: str,
-    threshold: float,
-    seed: int,
-):
-    dataset = generate_dataset(
+# Label wording differs by source and the difference matters, so it is never
+# rendered as a bare "ground truth".
+LABEL_NAMES = {
+    SYNTHETIC: "generator label",
+    MIMIC: "coded complication",
+}
+
+
+@st.cache_resource(show_spinner="Loading cohort...")
+def load_cases(source: str, num_cases: int, harm_ratio: float, hard_negative_ratio: float, seed: int):
+    """Returns (cases, watcher, reader). The reader is None when there are no notes."""
+    if source == MIMIC:
+        cases = load_mimic_cases()
+        # A whole admission is the unit here and coded procedures carry a date but
+        # no time, so arrival is the honest baseline boundary.
+        return cases, StructuredDataWatcher(anchor="admission"), None
+
+    cases = generate_dataset(
         num_cases=num_cases,
         harm_ratio=harm_ratio,
         hard_negative_ratio=hard_negative_ratio,
         seed=seed,
     )
-    watcher = StructuredDataWatcher()
-    reader = ClinicalNoteReader()
-    model = HarmScoringModel(
-        extractors=[watcher, reader], model_type=model_type, threshold=threshold
-    )
-    model.train(dataset)
-    return dataset, watcher, reader, model
+    return cases, StructuredDataWatcher(), ClinicalNoteReader()
 
 
-def score_cohort(dataset, model) -> pd.DataFrame:
-    rows = []
-    for case in dataset:
-        rows.append(
-            {
-                "patient_id": case.patient_id,
-                "age": case.age,
-                "gender": case.gender,
-                "score": model.predict_score(case),
-                "is_harm": case.is_harm_event,
-                "scenario": case.scenario,
-                "case_obj": case,
-            }
-        )
+@st.cache_resource(show_spinner="Fitting the scoring model...")
+def fit_model(_cases, _extractors, source: str, model_type: str, threshold: float, n: int):
+    model = HarmScoringModel(_extractors, model_type=model_type, threshold=threshold)
+    model.train(_cases)
+    return model
+
+
+@st.cache_resource(show_spinner="Scoring cohort...")
+def score_cohort(_cases, _model, source: str, model_type: str, threshold: float) -> pd.DataFrame:
+    rows = [
+        {
+            "case_id": case.patient_id,
+            "age": case.age,
+            "gender": case.gender,
+            "score": _model.predict_score(case),
+            "label": case.is_harm_event,
+            "group": case.scenario,
+            "events": len(case.events),
+            "case_obj": case,
+        }
+        for case in _cases
+    ]
     return pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
 
 
-def render_evidence(case: PatientCase, watcher, reader, model) -> None:
+@st.cache_resource(show_spinner="Measuring trigger coverage...")
+def coverage_frame(_cases, _watcher, source: str) -> pd.DataFrame:
+    """How often each trigger fires, and how it relates to the label."""
+    descriptions = _watcher.feature_descriptions()
+    fired = Counter()
+    fired_and_labeled = Counter()
+    for case in _cases:
+        for name, value in _watcher.extract_features(case).items():
+            if value > 0:
+                fired[name] += 1
+                if case.is_harm_event:
+                    fired_and_labeled[name] += 1
+
+    total = len(_cases)
+    base_rate = sum(c.is_harm_event for c in _cases) / total if total else 0.0
+    rows = []
+    for name, meaning in descriptions.items():
+        count = fired.get(name, 0)
+        rate = fired_and_labeled[name] / count if count else float("nan")
+        rows.append(
+            {
+                "trigger": name,
+                "meaning": meaning,
+                "cases": count,
+                "% of cohort": count / total if total else 0.0,
+                "label rate when fired": rate,
+                "lift": rate / base_rate if count and base_rate else float("nan"),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("lift", ascending=False, na_position="last")
+
+
+def render_timeline(case: PatientCase, limit: int = 12) -> None:
+    events = case.sorted_events()
+    by_type = Counter(e.event_type for e in events)
+    st.caption(
+        f"{len(events)} events: " + ", ".join(f"{n} {t}" for t, n in by_type.most_common())
+    )
+    if len(events) > limit:
+        st.caption(f"Showing the last {limit}.")
+    for event in events[-limit:]:
+        st.caption(f"{event.event_type.upper()} · {event.value} — {event.details}")
+
+
+def render_evidence(case: PatientCase, watcher, reader: Optional[ClinicalNoteReader], model) -> None:
     contributions = model.get_evidence(case)
     raising = [c for c in contributions if c.contribution > 0]
     lowering = [c for c in contributions if c.contribution < 0]
@@ -78,91 +138,109 @@ def render_evidence(case: PatientCase, watcher, reader, model) -> None:
             st.caption(
                 f"Baseline {breakdown['baseline_log_odds']:.2f} + contributions "
                 f"{breakdown['sum_of_contributions']:+.2f} = logit {breakdown['logit']:.2f}, "
-                f"which is a probability of {breakdown['probability']:.2f}."
+                f"a probability of {breakdown['probability']:.2f}."
             )
         else:
             st.caption(
-                "Contributions are the change in predicted risk at each split along this case's "
-                f"path through the tree, ending at {breakdown['probability']:.2f}."
+                "Contributions are the change in predicted risk at each split along this "
+                f"case's path through the tree, ending at {breakdown['probability']:.2f}."
             )
 
         structured = watcher.explain(case)
         if structured:
             st.markdown("**Structured triggers**")
-            for note in structured:
+            for note in structured[:10]:
                 st.write(f"- {note}")
+            if len(structured) > 10:
+                st.caption(f"{len(structured) - 10} more not shown.")
 
     with right:
-        findings = reader.explain(case)
         st.markdown("**Note language**")
-        if findings:
-            badge = {
-                "unanticipated": "not supposed to happen",
-                "expected_risk": "known / consented risk",
-                "neutral": "neutral",
-            }
-            for f in findings[:6]:
-                tag = badge.get(f.label, f.label)
-                st.write(f"- _{f.text}_")
-                extras = []
-                if f.error_terms:
-                    extras.append("process failure wording: " + ", ".join(f.error_terms))
-                if f.harm_terms:
-                    extras.append("deterioration wording: " + ", ".join(f.harm_terms))
-                if f.negated:
-                    extras.append("negated")
-                suffix = f" · {'; '.join(extras)}" if extras else ""
-                st.caption(f"{tag} ({f.probability:.0%} confidence){suffix}")
+        if reader is None:
+            st.info(
+                "This dataset carries no clinical notes, so the note reader contributes "
+                "nothing here and is excluded from the model."
+            )
         else:
-            st.write("No harm-adjacent language detected.")
+            findings = reader.explain(case)
+            if findings:
+                badge = {
+                    "unanticipated": "not supposed to happen",
+                    "expected_risk": "known / consented risk",
+                    "neutral": "neutral",
+                }
+                for f in findings[:6]:
+                    st.write(f"- _{f.text}_")
+                    extras = []
+                    if f.error_terms:
+                        extras.append("process failure wording: " + ", ".join(f.error_terms))
+                    if f.harm_terms:
+                        extras.append("deterioration wording: " + ", ".join(f.harm_terms))
+                    if f.negated:
+                        extras.append("negated")
+                    suffix = f" · {'; '.join(extras)}" if extras else ""
+                    st.caption(f"{badge.get(f.label, f.label)} ({f.probability:.0%}){suffix}")
+            else:
+                st.write("No harm-adjacent language detected.")
 
         st.markdown("**Timeline**")
-        for event in case.sorted_events():
-            st.caption(f"{event.event_type.upper()} · {event.value} — {event.details}")
+        render_timeline(case)
 
 
-def render_review_queue(scored: pd.DataFrame, watcher, reader, model, threshold: float) -> None:
-    flagged = scored[scored["score"] >= threshold]
+def render_review_queue(scored: pd.DataFrame, watcher, reader, model, source: str, queue) -> None:
+    label_name = LABEL_NAMES[source]
+    mode, capacity, threshold = queue
+
+    if mode == "capacity":
+        flagged = scored.head(capacity)
+        caption = f"Top {capacity} cases by score, sized to one review cycle."
+    else:
+        flagged = scored[scored["score"] >= threshold]
+        caption = f"Cases scoring at or above {threshold:.2f}."
 
     a, b, c, d = st.columns(4)
     a.metric("Cases scanned", len(scored))
-    b.metric("Flagged for review", len(flagged))
-    if len(flagged):
-        b.caption(f"{len(flagged) / len(scored):.0%} of the cohort")
-    hit_rate = flagged["is_harm"].mean() if len(flagged) else 0.0
-    c.metric("Flag hit rate", f"{hit_rate:.0%}")
-    caught = flagged["is_harm"].sum()
-    total_harm = scored["is_harm"].sum()
-    d.metric("Harm cases caught", f"{caught}/{total_harm}")
+    b.metric("In the queue", len(flagged))
+    hit_rate = flagged["label"].mean() if len(flagged) else 0.0
+    base = scored["label"].mean()
+    c.metric("Queue hit rate", f"{hit_rate:.0%}", delta=f"{hit_rate - base:+.0%} vs base")
+    d.metric("Caught", f"{int(flagged['label'].sum())}/{int(scored['label'].sum())}")
+    st.caption(caption)
 
     st.caption(
-        "Hit rate and caught counts use the synthetic ground truth. In deployment these come "
-        "from reviewer adjudication of the queue, which is also what retrains the model."
+        f"Hit rate counts cases carrying the {label_name}. In deployment this comes from "
+        "reviewer adjudication of this queue, which is also what would retrain the model."
     )
 
     if not len(flagged):
-        st.info("Nothing above the review threshold. Lower it in the sidebar to see more cases.")
+        st.info("Nothing in the queue. Widen the capacity or lower the threshold.")
         return
 
     for _, row in flagged.iterrows():
         header = (
-            f"Patient {row['patient_id'][:8]} · age {row['age']}{row['gender']} · "
-            f"score {row['score']:.2f} · ground truth harm={row['is_harm']}"
+            f"{row['case_id']} · age {row['age']}{row['gender']} · "
+            f"score {row['score']:.2f} · {label_name}={row['label']}"
         )
         with st.expander(header):
             render_evidence(row["case_obj"], watcher, reader, model)
 
 
-def render_model_tab(model, scored: pd.DataFrame) -> None:
+def render_model_tab(model, scored: pd.DataFrame, source: str) -> None:
     report = model.report
     if report is None:
         st.warning("Model has not been trained.")
         return
 
     st.markdown(
-        f"Weights are fit on **{report.n_train}** labeled cases and all numbers below come from "
-        f"**{report.n_test}** held-out cases the model never saw."
+        f"Weights are fit on **{report.n_train}** labeled cases. Every number below comes "
+        f"from **{report.n_test}** held-out cases the model never saw."
     )
+    if source == MIMIC:
+        st.warning(
+            "The label here is a proxy: ICD complication-of-care codes, the family behind the "
+            "AHRQ Patient Safety Indicators. Administrative coding is known to under-capture "
+            "harm, so absence of a code is weak evidence that nothing happened."
+        )
 
     a, b, c, d = st.columns(4)
     a.metric("ROC AUC (held out)", f"{report.roc_auc:.3f}")
@@ -171,60 +249,128 @@ def render_model_tab(model, scored: pd.DataFrame) -> None:
     d.metric(f"Precision @ {report.threshold:.2f}", f"{report.precision:.2f}")
 
     e, f, g = st.columns(3)
-    e.metric("Cross-validated ROC AUC", f"{report.cv_roc_auc_mean:.3f} ± {report.cv_roc_auc_std:.3f}")
+    e.metric(
+        "Cross-validated ROC AUC", f"{report.cv_roc_auc_mean:.3f} ± {report.cv_roc_auc_std:.3f}"
+    )
     f.metric("Brier score", f"{report.brier:.3f}", help="Calibration error; lower is better.")
-    g.metric("Harm prevalence", f"{report.positive_rate:.1%}")
+    g.metric("Label prevalence", f"{report.positive_rate:.1%}")
+    if report.n_test < 150:
+        st.caption(
+            "With a held-out set this small, the single-split numbers are noisy. The "
+            "cross-validated figure is the one to trust."
+        )
 
     tn, fp, fn, tp = report.confusion
     st.markdown("**Held-out confusion matrix**")
     st.dataframe(
         pd.DataFrame(
             [[tn, fp], [fn, tp]],
-            index=["actually no harm", "actually harm"],
+            index=["no label", "labeled"],
             columns=["not flagged", "flagged"],
-        ),
-        use_container_width=False,
+        )
     )
+
+    st.markdown("**Precision at review capacity**")
+    capacity_rows = []
+    for k in (10, 25, 50, 100, 200):
+        if k > len(scored):
+            break
+        top = scored.head(k)["label"]
+        capacity_rows.append(
+            {
+                "reviewing top": k,
+                "precision": top.mean(),
+                "caught": int(top.sum()),
+                "of total": int(scored["label"].sum()),
+            }
+        )
+    if capacity_rows:
+        st.dataframe(pd.DataFrame(capacity_rows), hide_index=True)
+        st.caption(
+            f"Base rate is {scored['label'].mean():.1%}, so anything above that is lift over "
+            "reviewing cases at random."
+        )
 
     st.markdown("**What the model learned each signal is worth**")
     weight_table = pd.DataFrame(model.feature_table())
-    st.dataframe(weight_table, use_container_width=True, hide_index=True)
     value_column = "log_odds_weight" if model.model_type == "logistic" else "split_importance"
+    st.dataframe(weight_table, width="stretch", hide_index=True)
     st.bar_chart(weight_table.set_index("feature")[value_column])
 
     if model.model_type == "logistic":
         st.caption(
-            "Positive coefficients push a case up the queue, negative ones pull it down. "
-            f"The intercept is {model.intercept:.2f}, the log-odds of harm when no signal fires."
+            "Positive coefficients push a case up the queue, negative ones pull it down. The "
+            f"intercept is {model.intercept:.2f}, the log-odds when no signal fires."
         )
     else:
         st.markdown("**Decision rules**")
         st.code(model.describe_rules(), language="text")
 
-    st.markdown("**Choosing the review threshold**")
+    st.markdown("**Choosing a threshold**")
     sweep = pd.DataFrame(report.threshold_sweep).set_index("threshold")
     st.line_chart(sweep[["precision", "recall", "f1"]])
-    st.caption("Pick the threshold from the review capacity you actually have, not from a default.")
 
-    st.markdown("**Score distribution by scenario**")
-    by_scenario = (
-        scored.groupby("scenario")
-        .agg(cases=("score", "size"), mean_score=("score", "mean"), harm=("is_harm", "mean"))
+    group_label = "admission type" if source == MIMIC else "scenario"
+    st.markdown(f"**Score distribution by {group_label}**")
+    by_group = (
+        scored.groupby("group")
+        .agg(cases=("score", "size"), mean_score=("score", "mean"), label_rate=("label", "mean"))
         .sort_values("mean_score", ascending=False)
     )
-    st.dataframe(by_scenario, use_container_width=True)
-    st.caption(
-        "Hard negatives such as planned_icu_admission and chemotherapy_cytopenia carry the same "
-        "structured red flags as harm cases. Their scores show whether the model is reading framing "
-        "or just pattern-matching on labs."
+    st.dataframe(by_group, width="stretch")
+
+
+def render_coverage_tab(coverage: pd.DataFrame, scored: pd.DataFrame, source: str) -> None:
+    st.markdown(
+        "Before trusting any score, check which triggers this dataset can actually support. "
+        "A trigger that never fires is more important to know about than one that does."
     )
 
+    dark = coverage[coverage["cases"] == 0]
+    if len(dark):
+        st.error(
+            "Not derivable from this dataset: "
+            + ", ".join(f"`{name}`" for name in dark["trigger"])
+            + ". These contribute nothing and should not be read as reassurance."
+        )
 
-def render_note_reader_tab(reader: ClinicalNoteReader) -> None:
+    st.dataframe(
+        coverage.style.format(
+            {"% of cohort": "{:.1%}", "label rate when fired": "{:.1%}", "lift": "{:.2f}x"}
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        f"Lift is the label rate among cases where the trigger fired, divided by the "
+        f"{scored['label'].mean():.1%} cohort base rate. Below 1.00x means the trigger is "
+        "pointing the wrong way."
+    )
+
+    weak = coverage[(coverage["cases"] >= 5) & (coverage["lift"] < 1.0)]
+    if len(weak):
+        st.warning(
+            "Firing but not informative here: "
+            + ", ".join(f"`{name}`" for name in weak["trigger"])
+        )
+
+    st.bar_chart(coverage.set_index("trigger")["lift"])
+
+
+def render_note_reader_tab(reader: Optional[ClinicalNoteReader], source: str) -> None:
+    if reader is None:
+        st.info(
+            f"The active dataset has no clinical notes, so the note reader is not part of the "
+            f"model right now. The MIMIC-IV demo excludes free text by design; notes ship as a "
+            f"separate credentialed dataset. You can still exercise the reader below — it is "
+            f"trained on its own labeled corpus, independent of the cohort."
+        )
+        reader = ClinicalNoteReader()
+
     st.markdown(
         "The reader classifies each sentence as unanticipated, known-risk, or neutral. It is a "
-        "TF-IDF n-gram logistic regression trained on a hand-labeled sentence corpus, paired with a "
-        "negation-aware lexicon pass so a ruled-out finding does not read as a real one."
+        "TF-IDF n-gram logistic regression trained on a hand-labeled sentence corpus, paired "
+        "with a negation-aware pass so a ruled-out finding does not read as a real one."
     )
 
     left, right = st.columns(2)
@@ -243,8 +389,8 @@ def render_note_reader_tab(reader: ClinicalNoteReader) -> None:
 
     st.markdown("**Try it on your own text**")
     default = (
-        "Postoperative bleeding required a return to theatre. The family had been told before surgery "
-        "that this was a recognized risk of the operation."
+        "Postoperative bleeding required a return to theatre. The family had been told before "
+        "surgery that this was a recognized risk of the operation."
     )
     text = st.text_area("Note text", value=default, height=110)
     if text.strip():
@@ -268,54 +414,110 @@ def render_note_reader_tab(reader: ClinicalNoteReader) -> None:
         st.json({k: v for k, v in reader.extract_features(probe).items()})
 
 
-def main() -> None:
-    st.title("SafetyNet: Harm Event Triage")
-    st.markdown(
-        "Scans structured records and clinical notes for patterns that suggest a harm event was "
-        "missed, then ranks cases for human review. Not a diagnostic tool."
-    )
-
+def sidebar():
     with st.sidebar:
-        st.header("Cohort")
-        num_cases = st.slider("Cases", 100, 2000, 600, step=100)
-        harm_ratio = st.slider("Harm prevalence", 0.05, 0.40, 0.15, step=0.05)
-        hard_negative_ratio = st.slider(
-            "Hard negatives among non-harm cases",
-            0.0,
-            0.8,
-            0.35,
-            step=0.05,
-            help="Cases with real red flags that documentation shows were expected or planned.",
-        )
-        seed = st.number_input("Random seed", value=7, step=1)
+        st.header("Data source")
+        have_mimic = mimic_available()
+        options = [SYNTHETIC, MIMIC] if have_mimic else [SYNTHETIC]
+        source = st.radio("Cohort", options=options, key="source_radio")
+        if not have_mimic:
+            st.caption(
+                f"Extract the MIMIC-IV demo to `{MIMIC_ROOT_DEFAULT}` to score real records."
+            )
+
+        num_cases, harm_ratio, hard_negative_ratio, seed = 600, 0.15, 0.35, 7
+        if source == SYNTHETIC:
+            num_cases = st.slider("Cases", 100, 2000, 600, step=100)
+            harm_ratio = st.slider("Harm prevalence", 0.05, 0.40, 0.15, step=0.05)
+            hard_negative_ratio = st.slider(
+                "Hard negatives among non-harm cases",
+                0.0,
+                0.8,
+                0.35,
+                step=0.05,
+                help="Cases with real red flags that documentation shows were expected.",
+            )
+            seed = int(st.number_input("Random seed", value=7, step=1))
+        else:
+            st.caption(
+                "100 real de-identified patients, 275 admissions, labeled by ICD "
+                "complication-of-care codes. No clinical notes in this release."
+            )
 
         st.header("Scoring model")
         model_type = st.radio(
             "Family",
             options=["logistic", "tree"],
             format_func=lambda m: "Logistic regression" if m == "logistic" else "Decision tree",
+            key="model_family",
         )
-        threshold = st.slider("Review threshold", 0.05, 0.95, 0.40, step=0.05)
 
-    dataset, watcher, reader, model = build_engine(
-        num_cases=num_cases,
-        harm_ratio=harm_ratio,
-        hard_negative_ratio=hard_negative_ratio,
-        model_type=model_type,
-        threshold=threshold,
-        seed=int(seed),
+        st.header("Review queue")
+        mode_label = st.radio(
+            "Size the queue by", ["Review capacity", "Score threshold"], key="queue_mode"
+        )
+        mode = "capacity" if mode_label == "Review capacity" else "threshold"
+        capacity = 20
+        threshold = 0.40
+        if mode == "capacity":
+            capacity = int(
+                st.number_input(
+                    "Cases per review cycle",
+                    min_value=5,
+                    max_value=300,
+                    value=20,
+                    step=5,
+                    help="Reviewers have fixed hours. Size the queue to them, not to a cutoff.",
+                )
+            )
+        else:
+            threshold = st.slider("Threshold", 0.05, 0.95, 0.40, step=0.05)
+
+    return source, num_cases, harm_ratio, hard_negative_ratio, seed, model_type, (
+        mode,
+        capacity,
+        threshold,
     )
-    scored = score_cohort(dataset, model)
 
-    queue_tab, model_tab, note_tab = st.tabs(
-        ["Review queue", "Model performance", "Note reader"]
+
+def main() -> None:
+    st.title("SafetyNet: Harm Event Triage")
+    st.markdown(
+        "Scans completed records for patterns suggesting a harm event went unreported, then "
+        "ranks cases for human review. Retrospective quality assurance, not a diagnostic tool."
+    )
+
+    source, num_cases, harm_ratio, hard_negative_ratio, seed, model_type, queue = sidebar()
+    cases, watcher, reader = load_cases(
+        source, num_cases, harm_ratio, hard_negative_ratio, seed
+    )
+    extractors = [watcher] if reader is None else [watcher, reader]
+    model = fit_model(cases, extractors, source, model_type, queue[2], len(cases))
+    scored = score_cohort(cases, model, source, model_type, queue[2])
+    coverage = coverage_frame(cases, watcher, source)
+
+    if source == MIMIC:
+        st.success(
+            f"Scoring **{len(cases)} real admissions** from the MIMIC-IV clinical database demo. "
+            "Structured signals only, since this release carries no free text."
+        )
+    else:
+        st.info(
+            f"Scoring **{len(cases)} synthetic cases**. Useful for exercising the note reader, "
+            "which real records here cannot."
+        )
+
+    queue_tab, model_tab, coverage_tab, note_tab = st.tabs(
+        ["Review queue", "Model performance", "Data coverage", "Note reader"]
     )
     with queue_tab:
-        render_review_queue(scored, watcher, reader, model, threshold)
+        render_review_queue(scored, watcher, reader, model, source, queue)
     with model_tab:
-        render_model_tab(model, scored)
+        render_model_tab(model, scored, source)
+    with coverage_tab:
+        render_coverage_tab(coverage, scored, source)
     with note_tab:
-        render_note_reader_tab(reader)
+        render_note_reader_tab(reader, source)
 
 
 if __name__ == "__main__":
