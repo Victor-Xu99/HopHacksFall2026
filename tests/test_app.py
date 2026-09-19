@@ -6,6 +6,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from src.data.mimic import mimic_available
+from src.data.safetyhops import hops_available
 from src.data.sql_store import available as sql_available
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
@@ -13,6 +14,7 @@ NEEDS_MIMIC = pytest.mark.skipif(not mimic_available(), reason="MIMIC-IV demo no
 NEEDS_SQL = pytest.mark.skipif(
     not sql_available(), reason="SafetyNet canonical layer not reachable"
 )
+NEEDS_HOPS = pytest.mark.skipif(not hops_available(), reason="SafetyHops database not reachable")
 
 
 def launch(timeout: int = 300) -> AppTest:
@@ -84,3 +86,10 @@ def test_sql_synthetic_cohort_keeps_the_note_reader():
     app = select_cohort(launch(timeout=600), "Synthetic", "SQL Server")
     assert not app.exception
     assert not any("no clinical notes" in info.value for info in app.info)
+
+
+@NEEDS_HOPS
+def test_safetyhops_sql_source_renders():
+    app = select_cohort(launch(timeout=600), "SafetyHops")
+    assert not app.exception
+    assert any("synthetic encounters" in success.value.lower() for success in app.success)
