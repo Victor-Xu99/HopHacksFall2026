@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+
+# Never commit patient data, even the open-access demo. Anchored to the repo root
+# so it does not also swallow src/data/.
+/data/
+*.csv
+*.csv.gz
+*.zip
+.pytest_cache/
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+.idea/
+.vscode/
