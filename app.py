@@ -6,6 +6,7 @@ import streamlit as st
 
 from src.data.generator import generate_dataset
 from src.data.mimic import MIMIC_ROOT_DEFAULT, load_mimic_cases, mimic_available
+from src.data.safetyhops import hops_available, load_safetyhops_cases
 from src.data.sql_store import available as sql_available
 from src.data.sql_store import read_cases, source_counts
 from src.domain.models import PatientCase, PatientEvent
@@ -19,6 +20,7 @@ SYNTHETIC = "Synthetic cohort"
 MIMIC = "MIMIC-IV demo (real records)"
 SQL_MIMIC = "MIMIC-IV demo (SQL Server)"
 SQL_SYNTHETIC = "Synthetic cohort (SQL Server)"
+SAFETYHOPS = "SafetyHops (SQL Server)"
 
 # Sidebar label -> the `source` tag the cohort carries in core.cases. Everything
 # read through here arrives as the same PatientCase objects as the CSV path, so
@@ -33,6 +35,7 @@ LABEL_NAMES = {
     MIMIC: "coded complication",
     SQL_MIMIC: "coded complication",
     SQL_SYNTHETIC: "generator label",
+    SAFETYHOPS: "condition-coded harm",
 }
 
 
@@ -53,6 +56,15 @@ def load_cases(source: str, num_cases: int, harm_ratio: float, hard_negative_rat
         # A whole admission is the unit here and coded procedures carry a date but
         # no time, so arrival is the honest baseline boundary.
         return cases, StructuredDataWatcher(anchor="admission"), None
+
+    if source == SAFETYHOPS:
+        cases = load_safetyhops_cases()
+        has_notes = any(e.event_type == "note" for case in cases for e in case.events)
+        return (
+            cases,
+            StructuredDataWatcher(anchor="admission"),
+            ClinicalNoteReader() if has_notes else None,
+        )
 
     if source in SQL_SOURCES:
         cases = read_cases(SQL_SOURCES[source])
@@ -275,6 +287,12 @@ def render_model_tab(model, scored: pd.DataFrame, source: str) -> None:
             "AHRQ Patient Safety Indicators. Administrative coding is known to under-capture "
             "harm, so absence of a code is weak evidence that nothing happened."
         )
+    if source == SAFETYHOPS:
+        st.warning(
+            "The label here is a planted harm condition on the encounter (hemorrhage, "
+            "oversedation, iatrogenic hypoglycemia, and similar). Chronic disease is not "
+            "counted as harm. There are no free-text notes in this warehouse."
+        )
 
     a, b, c, d = st.columns(4)
     a.metric("ROC AUC (held out)", f"{report.roc_auc:.3f}")
@@ -452,17 +470,28 @@ def sidebar():
     with st.sidebar:
         st.header("Data source")
         have_mimic = mimic_available()
+        have_hops = hops_available()
         cohorts = sql_cohorts()
-        options = [SYNTHETIC] + ([MIMIC] if have_mimic else []) + list(cohorts)
+        options = (
+            [SYNTHETIC]
+            + ([SAFETYHOPS] if have_hops else [])
+            + ([MIMIC] if have_mimic else [])
+            + list(cohorts)
+        )
         source = st.radio("Cohort", options=options, key="source_radio")
         if not have_mimic:
             st.caption(
                 f"Extract the MIMIC-IV demo to `{MIMIC_ROOT_DEFAULT}` to score real records."
             )
+        if not have_hops:
+            st.caption(
+                "SafetyHops is the synthetic warehouse (SQL Server database `SafetyHops`). "
+                "It is missing or unreachable on this instance."
+            )
         if not cohorts:
             st.caption(
-                "Run `python -m scripts.build_safetynet_db` to score cohorts straight out of "
-                "the SafetyNet database."
+                "Run `python -m scripts.build_safetynet_db` to score canonical `core` cohorts "
+                "out of the SafetyNet database."
             )
 
         num_cases, harm_ratio, hard_negative_ratio, seed = 600, 0.15, 0.35, 7
@@ -482,6 +511,12 @@ def sidebar():
             st.caption(
                 "100 real de-identified patients, 275 admissions, labeled by ICD "
                 "complication-of-care codes. No clinical notes in this release."
+            )
+        elif source == SAFETYHOPS:
+            st.caption(
+                "Synthetic encounters in SQL Server database `SafetyHops`: labs, meds, "
+                "procedures, and conditions. Harm labels come from planted harm conditions, "
+                "not from the watcher features. No clinical notes."
             )
         else:
             st.caption(
@@ -541,11 +576,21 @@ def main() -> None:
     scored = score_cohort(cases, model, source, model_type, queue[2])
     coverage = coverage_frame(cases, watcher, source)
 
-    origin = "the SafetyNet database" if source in SQL_SOURCES else "CSV"
+    if source == SAFETYHOPS:
+        origin = "SQL Server database `SafetyHops`"
+    elif source in SQL_SOURCES:
+        origin = "the SafetyNet database"
+    else:
+        origin = "CSV"
     if source in MIMIC_SOURCES:
         st.success(
             f"Scoring **{len(cases)} real admissions** from the MIMIC-IV clinical database demo, "
             f"read from {origin}. Structured signals only, since this release carries no free text."
+        )
+    elif source == SAFETYHOPS:
+        st.success(
+            f"Scoring **{len(cases)} synthetic encounters** from {origin}. "
+            "Structured signals only; this warehouse has no free-text notes."
         )
     else:
         st.info(
