@@ -1,5 +1,11 @@
 __pycache__/
 *.py[cod]
+
+# Never commit patient data, even the open-access demo.
+data/
+*.csv
+*.csv.gz
+*.zip
 .pytest_cache/
 .venv/
 venv/
