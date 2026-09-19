@@ -122,6 +122,36 @@ button {
   border-color: transparent;
 }
 
+.controls.stacked {
+  margin-top: 12px;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+
+.tab {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 16px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.tab.active {
+  background: var(--teal-2);
+  color: #042422;
+  border-color: transparent;
+}
+
+.more-page {
+  display: grid;
+  gap: 18px;
+}
+
 .importer {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -202,6 +232,14 @@ button {
   grid-template-columns: repeat(4, 1fr);
   gap: 14px;
   margin-bottom: 22px;
+}
+
+.metrics.hero {
+  grid-template-columns: 1fr 1fr;
+}
+
+.metrics.dense {
+  grid-template-columns: repeat(2, 1fr);
 }
 
 .metric {
@@ -325,9 +363,22 @@ button {
   font-size: 0.82rem;
 }
 
-.score {
+.score,
+.rank {
   color: var(--teal);
   font-weight: 600;
+}
+
+.who {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.why {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  color: var(--ink);
 }
 
 .chips {
@@ -407,6 +458,10 @@ button {
   padding: 40px 18px;
 }
 
+.status.tight {
+  padding: 8px 0;
+}
+
 .error {
   color: var(--danger);
   background: rgba(251, 113, 133, 0.1);
@@ -441,6 +496,8 @@ th {
 
 @media (max-width: 980px) {
   .metrics,
+  .metrics.hero,
+  .metrics.dense,
   .layout,
   .grid-2,
   .file-grid {
