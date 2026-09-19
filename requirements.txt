@@ -4,3 +4,8 @@ scikit-learn
 numpy
 faker
 pytest
+
+# SQL Server ingestion (scripts/load_mimic_sql.py).
+# pyodbc also needs the "ODBC Driver 17 for SQL Server" system driver installed.
+sqlalchemy
+pyodbc
