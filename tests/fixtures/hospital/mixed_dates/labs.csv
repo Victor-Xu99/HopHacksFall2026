@@ -1,0 +1,11 @@
+encounter_id,time,name,value,units
+9020,2026-08-18T10:00:00,Creatinine,0.8,mg/dL
+9020,2026-08-19T06:00:00,Creatinine,2.6,mg/dL
+9020,2026-08-19T06:00:00,Lactate,4.4,mmol/L
+9021,2026-09-16T10:00:00,Creatinine,0.8,mg/dL
+9021,2026-09-17T06:00:00,Creatinine,2.5,mg/dL
+9021,2026-09-17T06:00:00,Lactate,4.3,mmol/L
+9022,2026-08-22T09:00:00,Creatinine,0.7,mg/dL
+9022,2026-08-23T09:00:00,Hemoglobin,13.0,g/dL
+9023,2026-09-18T08:00:00,WBC,8.2,K/uL
+9024,2026-09-19T02:00:00,Creatinine,1.0,mg/dL

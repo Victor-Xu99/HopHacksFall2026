@@ -12,7 +12,15 @@ from src.data.hospital_extract import (
     write_extract_dir,
 )
 from src.data.sql_store import available as sql_available
-from src.data.sql_store import build_engine, discharged_unscored_ids, ensure_core_schema, read_cases
+from src.data.sql_store import (
+    build_engine,
+    discharged_unscored_ids,
+    ensure_core_schema,
+    read_cases,
+    record_review,
+    reviewed_case_ids,
+)
+from src.service import SOURCE_HOSPITAL, file_review, queue_sort_key, waiting_days
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hospital"
 NEEDS_SQL = pytest.mark.skipif(not sql_available(), reason="SafetyNet SQL not reachable")
@@ -57,6 +65,15 @@ def test_write_bundle_accepts_a_zip(tmp_path):
     assert {case.patient_id for case in cases} == {"88421", "88422", "88423"}
 
 
+def test_mixed_dates_keeps_old_ids_and_adds_stale_and_fresh():
+    cases, _report = load_extract_dir(FIXTURES / "mixed_dates")
+    by_id = {case.patient_id: case for case in cases}
+    assert "9001" in by_id and "9020" in by_id and "9023" in by_id
+    assert by_id["9023"].discharged_at is None
+    assert by_id["9020"].discharged_at.startswith("2026-08-20")
+    assert by_id["9021"].discharged_at.startswith("2026-09-18")
+
+
 def test_mixed_10_splits_discharged_and_in_house():
     cases, _report = load_extract_dir(FIXTURES / "mixed_10")
     discharged = {case.patient_id for case in cases if case.discharged_at}
@@ -89,7 +106,79 @@ def test_mixed_10_ranks_only_the_five_discharges():
     assert any(event.value == "Naloxone" for event in stored["9014"].events)
     ranked_later = rank_discharged(engine=engine)
     assert set(ranked_later["case_ids"]) == {"9011", "9012", "9013", "9014", "9015"}
+
+    dates = ingest_extract(FIXTURES / "mixed_dates", engine=engine)
+    stored = {case.patient_id: case for case in read_cases(HOSPITAL_SOURCE, engine=engine)}
+    assert set(stored) >= {
+        "9001",
+        "9002",
+        "9003",
+        "9004",
+        "9005",
+        "9011",
+        "9012",
+        "9013",
+        "9014",
+        "9015",
+        "9020",
+        "9021",
+        "9022",
+        "9023",
+        "9024",
+    }
+    assert any(event.value == "Naloxone" for event in stored["9001"].events)
+    assert dates["in_house"] == 2
+    assert dates["discharged"] == 13
+    assert set(dates["ready_to_rank"]) == {"9020", "9021", "9022"}
+    from src.service import waiting_days
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+    assert waiting_days(stored["9020"].discharged_at, now) >= 7
+    assert waiting_days(stored["9021"].discharged_at, now) < 7
     engine.dispose()
+
+
+@NEEDS_SQL
+def test_done_hides_a_discharged_stay_from_the_queue():
+    engine = build_engine()
+    ensure_core_schema(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM core.cases WHERE source = :s"), {"s": HOSPITAL_SOURCE})
+    ingest_extract(FIXTURES / "mixed_10", engine=engine)
+    rank_discharged(engine=engine)
+    file_review(SOURCE_HOSPITAL, "9002", "unclear", "pytest", "cleared from queue")
+    assert "9002" in reviewed_case_ids(HOSPITAL_SOURCE, engine=engine)
+    still_open = set(discharged_unscored_ids(HOSPITAL_SOURCE, engine=engine))
+    assert "9002" not in still_open
+    from src.service import review_payload
+
+    payload = review_payload(SOURCE_HOSPITAL, "logistic", 20)
+    assert payload["can_review"] is True
+    assert all(row["case_id"] != "9002" for row in payload["reviews"])
+    engine.dispose()
+
+
+def test_waiting_days_and_oldest_tie_break():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+    assert waiting_days("2026-09-12T11:00:00", now) == 7
+    assert waiting_days(None, now) is None
+    first, second = sorted(
+        [
+            {"score": 0.9, "discharged_at": "2026-09-12T11:00:00"},
+            {"score": 0.9, "discharged_at": "2026-09-05T16:00:00"},
+        ],
+        key=queue_sort_key,
+    )
+    assert first["discharged_at"].startswith("2026-09-05")
+    assert second["discharged_at"].startswith("2026-09-12")
+
+
+def test_file_review_rejects_in_memory_sources():
+    with pytest.raises(ValueError, match="not stored"):
+        file_review("synthetic", "anything", "unclear")
 
 
 def test_in_house_extract_leaves_maria_undischarged():

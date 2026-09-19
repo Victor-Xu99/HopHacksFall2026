@@ -13,11 +13,12 @@ from src.data.hospital_extract import HOSPITAL_SOURCE, ingest_and_rank
 from src.data.mimic import MIMIC_ROOT_DEFAULT, load_mimic_cases, mimic_available
 from src.data.safetyhops import hops_available, load_safetyhops_cases
 from src.data.sql_store import available as sql_available
-from src.data.sql_store import read_cases, source_counts
+from src.data.sql_store import read_cases, record_review, reviewed_case_ids, source_counts
 from src.domain.models import PatientCase, PatientEvent
 from src.engine.model import HarmScoringModel
 from src.engine.nlp_reader import ClinicalNoteReader
 from src.engine.watcher import StructuredDataWatcher
+from src.service import STALE_WAIT_DAYS, waiting_days
 
 st.set_page_config(page_title="SafetyNet", layout="wide")
 logger = logging.getLogger(__name__)
@@ -118,11 +119,17 @@ def score_cohort(_cases, _model, source: str, model_type: str, threshold: float)
             "label": case.is_harm_event,
             "group": case.scenario,
             "events": len(case.events),
+            "discharged_at": case.discharged_at or "9999-12-31",
+            "waiting_days": waiting_days(case.discharged_at),
             "case_obj": case,
         }
         for case in _cases
     ]
-    return pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["score", "discharged_at"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
 
 
 @st.cache_resource(show_spinner="Measuring trigger coverage...")
@@ -261,6 +268,10 @@ def render_review_queue(scored: pd.DataFrame, watcher, reader, model, source: st
             f"Showing every stay whose score is at least {threshold:.2f}."
         )
 
+    if source == HOSPITAL and sql_available():
+        done = set(reviewed_case_ids(HOSPITAL_SOURCE))
+        flagged = flagged[~flagged["case_id"].isin(done)]
+
     tagged_on_list = int(flagged["label"].sum()) if len(flagged) else 0
     tagged_in_all = int(scored["label"].sum())
     share_on_list = flagged["label"].mean() if len(flagged) else 0.0
@@ -310,8 +321,49 @@ def render_review_queue(scored: pd.DataFrame, watcher, reader, model, source: st
             f"{row['case_id']} | age {row['age']}{row['gender']} | "
             f"score {row['score']:.2f} | harm tag: {'yes' if row['label'] else 'no'}"
         )
+        wait = row.get("waiting_days")
+        if pd.notna(wait) and wait is not None:
+            header += f" | waiting {int(wait)}d"
+            if int(wait) >= STALE_WAIT_DAYS:
+                header += " STALE"
         with st.expander(header):
+            cols = st.columns([4, 1])
+            with cols[1]:
+                if source == HOSPITAL and st.button("Done", key=f"done_{row['case_id']}"):
+                    try:
+                        record_review(
+                            HOSPITAL_SOURCE,
+                            str(row["case_id"]),
+                            "queue",
+                            "unclear",
+                            "cleared from queue",
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        logger.exception("Could not save review")
+                        st.error(str(exc))
             render_evidence(row["case_obj"], watcher, reader, model)
+            if source == HOSPITAL:
+                v1, v2, v3 = st.columns(3)
+                for label, decision, col in (
+                    ("Harm", "harm", v1),
+                    ("No harm", "no_harm", v2),
+                    ("Unclear", "unclear", v3),
+                ):
+                    with col:
+                        if st.button(label, key=f"{decision}_{row['case_id']}"):
+                            try:
+                                record_review(
+                                    HOSPITAL_SOURCE,
+                                    str(row["case_id"]),
+                                    "queue",
+                                    decision,
+                                    None,
+                                )
+                                st.rerun()
+                            except Exception as exc:
+                                logger.exception("Could not save review")
+                                st.error(str(exc))
 
 
 def render_model_tab(model, scored: pd.DataFrame, source: str) -> None:

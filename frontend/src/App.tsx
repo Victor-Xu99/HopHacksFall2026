@@ -116,6 +116,37 @@ export default function App() {
     }
   }
 
+  async function markReviewed(caseId: string, decision: string, notes?: string) {
+    if (!data?.can_review) {
+      setError("Done is saved only for hospital stays stored in SafetyNet SQL.");
+      return;
+    }
+    setError("");
+    const res = await fetch("/api/reviews", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source: data.source,
+        case_id: caseId,
+        decision,
+        reviewer: "queue",
+        notes: notes ?? null,
+      }),
+    });
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      const detail = payload.detail;
+      throw new Error(
+        typeof detail === "string" ? detail : detail ? JSON.stringify(detail) : "Could not save review"
+      );
+    }
+    const remaining = data.reviews.filter((row) => row.case_id !== caseId);
+    setData({ ...data, reviews: remaining, top_reviews: remaining.length });
+    if (selectedId === caseId) {
+      setSelectedId(remaining[0]?.case_id ?? null);
+    }
+  }
+
   const selected: Review | undefined = useMemo(
     () => data?.reviews.find((row) => row.case_id === selectedId),
     [data, selectedId]
@@ -275,28 +306,52 @@ export default function App() {
           {loading ? <div className="status">Scoring the cohort. First load can take a minute.</div> : null}
           <div className="list">
             {data?.reviews.map((row) => (
-              <button
+              <div
                 key={row.case_id}
                 className={row.case_id === selectedId ? "row active" : "row"}
-                type="button"
-                onClick={() => setSelectedId(row.case_id)}
               >
-                <div className="row-top">
-                  <span className="mono" title={row.case_id}>
-                    {shortId(row.case_id)}
-                  </span>
-                  <span className="score">{score(row.score)}</span>
-                </div>
-                <div className="chips">
-                  <span className={row.label ? "chip tagged" : "chip clear"}>
-                    {row.label ? "already tagged" : "not tagged"}
-                  </span>
-                  <span className="chip">
-                    {row.age} / {row.gender}
-                  </span>
-                  <span className="chip">{row.scenario}</span>
-                </div>
-              </button>
+                <button
+                  className="row-main"
+                  type="button"
+                  onClick={() => setSelectedId(row.case_id)}
+                >
+                  <div className="row-top">
+                    <span className="mono" title={row.case_id}>
+                      {shortId(row.case_id)}
+                    </span>
+                    <span className="score">{score(row.score)}</span>
+                  </div>
+                  <div className="chips">
+                    <span className={row.label ? "chip tagged" : "chip clear"}>
+                      {row.label ? "already tagged" : "not tagged"}
+                    </span>
+                    <span className="chip">
+                      {row.age} / {row.gender}
+                    </span>
+                    <span className="chip">{row.scenario}</span>
+                    {row.waiting_days != null ? (
+                      <span className={row.stale ? "chip stale" : "chip"}>
+                        {row.stale
+                          ? `waiting ${row.waiting_days}d - stale`
+                          : `waiting ${row.waiting_days}d`}
+                      </span>
+                    ) : null}
+                  </div>
+                </button>
+                {data.can_review ? (
+                  <button
+                    className="done-btn"
+                    type="button"
+                    onClick={() =>
+                      markReviewed(row.case_id, "unclear", "cleared from queue").catch((err) =>
+                        setError(err instanceof Error ? err.message : "Could not save review")
+                      )
+                    }
+                  >
+                    Done
+                  </button>
+                ) : null}
+              </div>
             ))}
           </div>
         </div>
@@ -317,7 +372,47 @@ export default function App() {
                 <p>
                   {selected.age}-year-old {selected.gender}. {selected.event_count} events on
                   file. Label: {data?.label_name}.
+                  {selected.waiting_days != null
+                    ? ` Waiting ${selected.waiting_days} day${selected.waiting_days === 1 ? "" : "s"} since discharge.`
+                    : ""}
+                  {selected.stale ? " This stay has been waiting a week or more." : ""}
                 </p>
+                {data?.can_review ? (
+                  <div className="verdicts">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        markReviewed(selected.case_id, "harm").catch((err) =>
+                          setError(err instanceof Error ? err.message : "Could not save review")
+                        )
+                      }
+                    >
+                      Harm
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        markReviewed(selected.case_id, "no_harm").catch((err) =>
+                          setError(err instanceof Error ? err.message : "Could not save review")
+                        )
+                      }
+                    >
+                      No harm
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        markReviewed(selected.case_id, "unclear").catch((err) =>
+                          setError(err instanceof Error ? err.message : "Could not save review")
+                        )
+                      }
+                    >
+                      Unclear
+                    </button>
+                  </div>
+                ) : (
+                  <p>Done is saved only for hospital stays in SafetyNet SQL.</p>
+                )}
               </div>
               <div className="grid-2">
                 <div className="card">

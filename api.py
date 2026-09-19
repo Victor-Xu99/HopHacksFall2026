@@ -1,15 +1,24 @@
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from src.data.hospital_adapt import write_bundle
 from src.data.hospital_extract import ingest_and_rank, ingest_extract
+from src.data.sql_store import DECISIONS
 from src.data.sql_store import available as sql_available
 from src.data.sql_store import stay_census
-from src.service import SOURCE_HOSPITAL, list_sources, load_bundle, review_payload, trained_model
+from src.service import (
+    SOURCE_HOSPITAL,
+    file_review,
+    list_sources,
+    load_bundle,
+    review_payload,
+    trained_model,
+)
 
 app = FastAPI(title="SafetyNet API")
 app.add_middleware(
@@ -45,6 +54,29 @@ def review(
     if model_type not in ("logistic", "tree"):
         raise HTTPException(status_code=400, detail="model_type must be logistic or tree.")
     return review_payload(source, model_type, limit)
+
+
+class ReviewIn(BaseModel):
+    source: str
+    case_id: str
+    decision: str = Field(..., description="harm, no_harm, or unclear")
+    reviewer: str = "queue"
+    notes: Optional[str] = None
+
+
+@app.post("/api/reviews")
+def save_review(body: ReviewIn):
+    if body.decision not in DECISIONS:
+        raise HTTPException(status_code=400, detail=f"decision must be one of {DECISIONS}.")
+    try:
+        review_key = file_review(
+            body.source, body.case_id, body.decision, body.reviewer, body.notes
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "review_key": review_key, "case_id": body.case_id, "decision": body.decision}
 
 
 @app.post("/api/warmup")

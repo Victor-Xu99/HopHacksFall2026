@@ -783,6 +783,28 @@ def record_review(
             engine.dispose()
 
 
+def reviewed_case_ids(source: str, engine: Optional[Engine] = None) -> List[str]:
+    """Stay ids that already have at least one adjudication."""
+    owns_engine = engine is None
+    engine = engine or build_engine()
+    ensure_core_schema(engine)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT DISTINCT c.source_case_id "
+                    "FROM core.reviews AS r "
+                    "JOIN core.cases AS c ON c.case_key = r.case_key "
+                    "WHERE c.source = :source"
+                ),
+                {"source": source},
+            ).fetchall()
+    finally:
+        if owns_engine:
+            engine.dispose()
+    return [row[0] for row in rows]
+
+
 # ------------------------------------------------------------------------ counts
 
 

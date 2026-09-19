@@ -7,6 +7,7 @@ is not reloaded on every click.
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,7 +16,7 @@ from src.data.hospital_extract import HOSPITAL_SOURCE
 from src.data.mimic import load_mimic_cases, mimic_available
 from src.data.safetyhops import hops_available, load_safetyhops_cases
 from src.data.sql_store import available as sql_available
-from src.data.sql_store import read_cases, source_counts, stay_census
+from src.data.sql_store import record_review, reviewed_case_ids, read_cases, source_counts, stay_census
 from src.domain.models import PatientCase
 from src.engine.model import HarmScoringModel
 from src.engine.nlp_reader import ClinicalNoteReader
@@ -27,6 +28,14 @@ SOURCE_SAFETYHOPS = "safetyhops"
 SOURCE_SQL_MIMIC = "sql_mimic"
 SOURCE_SQL_SYNTHETIC = "sql_synthetic"
 SOURCE_HOSPITAL = HOSPITAL_SOURCE
+STALE_WAIT_DAYS = 7
+
+# API source id -> core.cases.source tag. Only these can persist a Done click.
+SQL_REVIEW_TAGS = {
+    SOURCE_HOSPITAL: HOSPITAL_SOURCE,
+    SOURCE_SQL_MIMIC: "mimic_iv_demo",
+    SOURCE_SQL_SYNTHETIC: "synthetic",
+}
 
 LABEL_NAMES = {
     SOURCE_SYNTHETIC: "generator label",
@@ -143,6 +152,41 @@ def _serialize_contribution(item) -> Dict[str, Any]:
     }
 
 
+def waiting_days(discharged_at: Optional[str], now: Optional[datetime] = None) -> Optional[int]:
+    if not discharged_at:
+        return None
+    when = datetime.fromisoformat(discharged_at.replace("Z", ""))
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    return max(0, (clock - when).days)
+
+
+def queue_sort_key(row: Dict[str, Any]) -> Tuple[float, str]:
+    """Highest score first; if scores match, oldest discharge first."""
+    discharged = row.get("discharged_at") or "9999-12-31"
+    return (-float(row["score"]), discharged)
+
+
+def sql_tag(source: str) -> Optional[str]:
+    return SQL_REVIEW_TAGS.get(source)
+
+
+def file_review(
+    source: str,
+    case_id: str,
+    decision: str,
+    reviewer: str = "queue",
+    notes: Optional[str] = None,
+) -> int:
+    tag = sql_tag(source)
+    if tag is None:
+        raise ValueError("This source is not stored in SafetyNet SQL, so reviews cannot be saved.")
+    return record_review(tag, case_id, reviewer, decision, notes)
+
+
 def review_payload(source: str, model_type: str, limit: int) -> Dict[str, Any]:
     cases, watcher, reader = load_bundle(source)
     model = trained_model(source, model_type)
@@ -156,15 +200,21 @@ def review_payload(source: str, model_type: str, limit: int) -> Dict[str, Any]:
                 "score": model.predict_score(case),
                 "label": case.is_harm_event,
                 "event_count": len(case.events),
+                "discharged_at": case.discharged_at,
+                "waiting_days": waiting_days(case.discharged_at),
                 "case": case,
             }
             for case in cases
         ),
-        key=lambda row: row["score"],
-        reverse=True,
+        key=queue_sort_key,
     )
 
-    flagged = scored[: max(1, min(limit, len(scored)))]
+    can_review = sql_tag(source) is not None and sql_available()
+    if can_review:
+        done = set(reviewed_case_ids(sql_tag(source)))
+        scored = [row for row in scored if row["case_id"] not in done]
+
+    flagged = scored[: max(1, min(limit, len(scored)))] if scored else []
     tagged_on_list = sum(1 for row in flagged if row["label"])
     tagged_in_all = sum(1 for row in scored if row["label"])
     share_on_list = tagged_on_list / len(flagged) if flagged else 0.0
@@ -193,6 +243,9 @@ def review_payload(source: str, model_type: str, limit: int) -> Dict[str, Any]:
                 "score": float(row["score"]),
                 "label": row["label"],
                 "event_count": row["event_count"],
+                "discharged_at": row["discharged_at"],
+                "waiting_days": row["waiting_days"],
+                "stale": row["waiting_days"] is not None and row["waiting_days"] >= STALE_WAIT_DAYS,
                 "raising": [_serialize_contribution(c) for c in evidence if c.contribution > 0][:8],
                 "lowering": [_serialize_contribution(c) for c in evidence if c.contribution < 0][:8],
                 "triggers": watcher.explain(case)[:10],
@@ -267,4 +320,5 @@ def review_payload(source: str, model_type: str, limit: int) -> Dict[str, Any]:
         "coverage": coverage,
         "weights": weights,
         "model_type": model_type,
+        "can_review": can_review,
     }

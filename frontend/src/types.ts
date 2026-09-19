@@ -39,6 +39,9 @@ export type Review = {
   triggers: string[];
   notes: Finding[];
   timeline: TimelineEvent[];
+  discharged_at?: string | null;
+  waiting_days?: number | null;
+  stale?: boolean;
 };
 
 export type CoverageRow = {
@@ -84,4 +87,5 @@ export type ReviewPayload = {
   report: TrainingReport | null;
   coverage: CoverageRow[];
   model_type: string;
+  can_review?: boolean;
 };

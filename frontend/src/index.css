@@ -260,14 +260,52 @@ button {
 }
 
 .row {
-  width: 100%;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px 8px 16px;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.row-main {
+  flex: 1;
   text-align: left;
   background: transparent;
   border: 0;
-  border-bottom: 1px solid var(--line);
-  padding: 14px 16px;
+  padding: 6px 0;
   display: grid;
   gap: 6px;
+}
+
+.done-btn {
+  align-self: center;
+  min-width: auto;
+  background: transparent;
+  color: var(--teal);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.done-btn:hover {
+  background: var(--teal-glow);
+}
+
+.verdicts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.verdicts button {
+  min-width: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 12px;
 }
 
 .row:hover,
@@ -314,6 +352,11 @@ button {
 .chip.clear {
   background: rgba(52, 211, 153, 0.12);
   color: var(--ok);
+}
+
+.chip.stale {
+  background: rgba(251, 191, 36, 0.16);
+  color: var(--warn);
 }
 
 .detail {
