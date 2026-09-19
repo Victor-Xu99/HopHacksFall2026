@@ -1,14 +1,19 @@
-"""Load the MIMIC-IV demo into SQL Server.
+"""Load the MIMIC-IV demo into SQL Server as a raw layer.
 
 Creates a database, one schema per MIMIC module (`hosp`, `icu`), and one table per
 CSV, with column types inferred from the data rather than everything dumped into
 NVARCHAR. Datetime columns are recognized by name and stored as DATETIME2 so that
 date arithmetic works in T-SQL.
 
+The module schema can be renamed so several sources can share one database without
+colliding: `--schema-prefix mimic_` lands the tables in `mimic_hosp`/`mimic_icu`,
+and `--schema-map icu=mimic_icu` renames individual modules outright. Nothing here
+touches the canonical layer; raw schemas are never required to agree with it.
+
 Usage:
     python -m scripts.load_mimic_sql
     python -m scripts.load_mimic_sql --zip C:\\path\\to\\mimic-iv-...-demo-2.2.zip
-    python -m scripts.load_mimic_sql --database mimic_iv_demo --drop-existing
+    python -m scripts.load_mimic_sql --database SafetyNet --schema-prefix mimic_
 
 Windows authentication is used by default. Nothing here writes credentials to disk.
 """
@@ -23,16 +28,15 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
-import pyodbc
-from sqlalchemy import Column, Integer, MetaData, Table, create_engine, event, inspect, text
+from sqlalchemy import inspect, text
 from sqlalchemy.dialects.mssql import BIGINT, BIT, DATETIME2, FLOAT, NVARCHAR
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import UnicodeText
 
+from src.data.sql_store import DEFAULT_SERVER, build_engine, ensure_database, ensure_schema
+
 DEFAULT_ROOT = Path("data/mimic-iv-clinical-database-demo-2.2")
-DEFAULT_SERVER = r".\SQLEXPRESS"
 DEFAULT_DATABASE = "mimic_iv_demo"
-DRIVER = "ODBC Driver 17 for SQL Server"
 
 # MIMIC names every timestamp column with one of these suffixes, plus `dod`.
 DATETIME_SUFFIXES = ("time", "date")
@@ -49,41 +53,6 @@ NVARCHAR_LIMIT = 4000
 def is_datetime_column(name: str) -> bool:
     lowered = name.lower()
     return lowered in DATETIME_EXACT or lowered.endswith(DATETIME_SUFFIXES)
-
-
-def connection_url(server: str, database: str) -> str:
-    return (
-        f"mssql+pyodbc://@{server}/{database}"
-        f"?driver={DRIVER.replace(' ', '+')}&trusted_connection=yes&TrustServerCertificate=yes"
-    )
-
-
-def ensure_database(server: str, database: str) -> None:
-    """CREATE DATABASE cannot run inside a transaction, so it goes through raw pyodbc."""
-    connection_string = (
-        f"DRIVER={{{DRIVER}}};SERVER={server};DATABASE=master;"
-        "Trusted_Connection=yes;TrustServerCertificate=yes"
-    )
-    with pyodbc.connect(connection_string, autocommit=True, timeout=10) as connection:
-        exists = connection.execute(
-            "SELECT 1 FROM sys.databases WHERE name = ?", database
-        ).fetchone()
-        if exists:
-            print(f"database [{database}] already present")
-            return
-        connection.execute(f"CREATE DATABASE [{database}]")
-        print(f"created database [{database}]")
-
-
-def ensure_schema(engine: Engine, schema: str) -> None:
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                "IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = :s) "
-                f"EXEC('CREATE SCHEMA [{schema}]')"
-            ),
-            {"s": schema},
-        )
 
 
 def read_csv_typed(path: Path) -> pd.DataFrame:
@@ -116,16 +85,21 @@ def sql_type(series: pd.Series):
     return NVARCHAR(max(16, min(NVARCHAR_LIMIT, int(widest * 2) + 16)))
 
 
-def build_engine(server: str, database: str, fast: bool) -> Engine:
-    engine = create_engine(connection_url(server, database), future=True)
-    if fast:
+def parse_schema_map(entries: Optional[List[str]]) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for entry in entries or []:
+        module, _, schema = entry.partition("=")
+        if not module or not schema:
+            raise ValueError(f"--schema-map entries look like module=schema, got {entry!r}")
+        mapping[module] = schema
+    return mapping
 
-        @event.listens_for(engine, "before_cursor_execute")
-        def enable_fast_executemany(conn, cursor, statement, parameters, context, executemany):
-            if executemany:
-                cursor.fast_executemany = True
 
-    return engine
+def target_schema(module: str, prefix: str = "", mapping: Optional[Dict[str, str]] = None) -> str:
+    """Where a MIMIC module's tables land. An explicit mapping wins over the prefix."""
+    if mapping and module in mapping:
+        return mapping[module]
+    return f"{prefix}{module}"
 
 
 def load_table(
@@ -187,7 +161,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--no-fast", action="store_true", help="Disable pyodbc fast_executemany."
     )
     parser.add_argument("--only", nargs="*", help="Load only these tables, e.g. hosp/labevents.")
+    parser.add_argument(
+        "--schema-prefix",
+        default="",
+        help="Prefix every module schema, e.g. mimic_ gives mimic_hosp and mimic_icu.",
+    )
+    parser.add_argument(
+        "--schema-map",
+        nargs="*",
+        metavar="MODULE=SCHEMA",
+        help="Rename individual modules outright, e.g. icu=mimic_icu.",
+    )
     args = parser.parse_args(argv)
+
+    try:
+        schema_map = parse_schema_map(args.schema_map)
+    except ValueError as problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
 
     root = args.root
     if args.zip:
@@ -207,15 +198,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     print(f"{len(paths)} tables found under {root}")
-    ensure_database(args.server, args.database)
+    created = ensure_database(args.server, args.database)
+    print(f"{'created' if created else 'found'} database [{args.database}]")
     engine = build_engine(args.server, args.database, fast=not args.no_fast)
 
-    for schema in sorted({p.parent.name for p in paths}):
+    schemas = {p.parent.name: target_schema(p.parent.name, args.schema_prefix, schema_map) for p in paths}
+    for schema in sorted(set(schemas.values())):
         ensure_schema(engine, schema)
 
     summary: List[Dict[str, object]] = []
     for path in paths:
-        schema = path.parent.name
+        schema = schemas[path.parent.name]
         table = path.name[: -len(".csv.gz")]
         started = time.perf_counter()
         frame = read_csv_typed(path)

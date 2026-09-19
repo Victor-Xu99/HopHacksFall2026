@@ -1,11 +1,13 @@
 from collections import Counter
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
 from src.data.generator import generate_dataset
 from src.data.mimic import MIMIC_ROOT_DEFAULT, load_mimic_cases, mimic_available
+from src.data.sql_store import available as sql_available
+from src.data.sql_store import read_cases, source_counts
 from src.domain.models import PatientCase, PatientEvent
 from src.engine.model import HarmScoringModel
 from src.engine.nlp_reader import ClinicalNoteReader
@@ -15,13 +17,32 @@ st.set_page_config(page_title="SafetyNet", layout="wide")
 
 SYNTHETIC = "Synthetic cohort"
 MIMIC = "MIMIC-IV demo (real records)"
+SQL_MIMIC = "MIMIC-IV demo (SQL Server)"
+SQL_SYNTHETIC = "Synthetic cohort (SQL Server)"
+
+# Sidebar label -> the `source` tag the cohort carries in core.cases. Everything
+# read through here arrives as the same PatientCase objects as the CSV path, so
+# nothing downstream of load_cases knows the difference.
+SQL_SOURCES = {SQL_MIMIC: "mimic_iv_demo", SQL_SYNTHETIC: "synthetic"}
+MIMIC_SOURCES = (MIMIC, SQL_MIMIC)
 
 # Label wording differs by source and the difference matters, so it is never
 # rendered as a bare "ground truth".
 LABEL_NAMES = {
     SYNTHETIC: "generator label",
     MIMIC: "coded complication",
+    SQL_MIMIC: "coded complication",
+    SQL_SYNTHETIC: "generator label",
 }
+
+
+@st.cache_resource(show_spinner=False)
+def sql_cohorts() -> Dict[str, int]:
+    """Case count per selectable SQL cohort; empty when SQL Server is unreachable."""
+    if not sql_available():
+        return {}
+    counts = source_counts()
+    return {label: counts[tag] for label, tag in SQL_SOURCES.items() if counts.get(tag)}
 
 
 @st.cache_resource(show_spinner="Loading cohort...")
@@ -32,6 +53,19 @@ def load_cases(source: str, num_cases: int, harm_ratio: float, hard_negative_rat
         # A whole admission is the unit here and coded procedures carry a date but
         # no time, so arrival is the honest baseline boundary.
         return cases, StructuredDataWatcher(anchor="admission"), None
+
+    if source in SQL_SOURCES:
+        cases = read_cases(SQL_SOURCES[source])
+        anchor = "admission" if source in MIMIC_SOURCES else "procedure"
+        # Whether a cohort carries notes is a property of the data, not of the
+        # source name. Without any, the reader is dropped rather than asked for
+        # features it would have to invent.
+        has_notes = any(e.event_type == "note" for case in cases for e in case.events)
+        return (
+            cases,
+            StructuredDataWatcher(anchor=anchor),
+            ClinicalNoteReader() if has_notes else None,
+        )
 
     cases = generate_dataset(
         num_cases=num_cases,
@@ -235,7 +269,7 @@ def render_model_tab(model, scored: pd.DataFrame, source: str) -> None:
         f"Weights are fit on **{report.n_train}** labeled cases. Every number below comes "
         f"from **{report.n_test}** held-out cases the model never saw."
     )
-    if source == MIMIC:
+    if source in MIMIC_SOURCES:
         st.warning(
             "The label here is a proxy: ICD complication-of-care codes, the family behind the "
             "AHRQ Patient Safety Indicators. Administrative coding is known to under-capture "
@@ -310,7 +344,7 @@ def render_model_tab(model, scored: pd.DataFrame, source: str) -> None:
     sweep = pd.DataFrame(report.threshold_sweep).set_index("threshold")
     st.line_chart(sweep[["precision", "recall", "f1"]])
 
-    group_label = "admission type" if source == MIMIC else "scenario"
+    group_label = "admission type" if source in MIMIC_SOURCES else "scenario"
     st.markdown(f"**Score distribution by {group_label}**")
     by_group = (
         scored.groupby("group")
@@ -418,11 +452,17 @@ def sidebar():
     with st.sidebar:
         st.header("Data source")
         have_mimic = mimic_available()
-        options = [SYNTHETIC, MIMIC] if have_mimic else [SYNTHETIC]
+        cohorts = sql_cohorts()
+        options = [SYNTHETIC] + ([MIMIC] if have_mimic else []) + list(cohorts)
         source = st.radio("Cohort", options=options, key="source_radio")
         if not have_mimic:
             st.caption(
                 f"Extract the MIMIC-IV demo to `{MIMIC_ROOT_DEFAULT}` to score real records."
+            )
+        if not cohorts:
+            st.caption(
+                "Run `python -m scripts.build_safetynet_db` to score cohorts straight out of "
+                "the SafetyNet database."
             )
 
         num_cases, harm_ratio, hard_negative_ratio, seed = 600, 0.15, 0.35, 7
@@ -438,10 +478,15 @@ def sidebar():
                 help="Cases with real red flags that documentation shows were expected.",
             )
             seed = int(st.number_input("Random seed", value=7, step=1))
-        else:
+        elif source == MIMIC:
             st.caption(
                 "100 real de-identified patients, 275 admissions, labeled by ICD "
                 "complication-of-care codes. No clinical notes in this release."
+            )
+        else:
+            st.caption(
+                f"{cohorts[source]} cases read from `core.cases`, source tag "
+                f"`{SQL_SOURCES[source]}`. Same objects the CSV path produces."
             )
 
         st.header("Scoring model")
@@ -496,15 +541,16 @@ def main() -> None:
     scored = score_cohort(cases, model, source, model_type, queue[2])
     coverage = coverage_frame(cases, watcher, source)
 
-    if source == MIMIC:
+    origin = "the SafetyNet database" if source in SQL_SOURCES else "CSV"
+    if source in MIMIC_SOURCES:
         st.success(
-            f"Scoring **{len(cases)} real admissions** from the MIMIC-IV clinical database demo. "
-            "Structured signals only, since this release carries no free text."
+            f"Scoring **{len(cases)} real admissions** from the MIMIC-IV clinical database demo, "
+            f"read from {origin}. Structured signals only, since this release carries no free text."
         )
     else:
         st.info(
-            f"Scoring **{len(cases)} synthetic cases**. Useful for exercising the note reader, "
-            "which real records here cannot."
+            f"Scoring **{len(cases)} synthetic cases** from {origin}. Useful for exercising the "
+            "note reader, which real records here cannot."
         )
 
     queue_tab, model_tab, coverage_tab, note_tab = st.tabs(

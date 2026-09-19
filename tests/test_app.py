@@ -6,9 +6,13 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from src.data.mimic import mimic_available
+from src.data.sql_store import available as sql_available
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 NEEDS_MIMIC = pytest.mark.skipif(not mimic_available(), reason="MIMIC-IV demo not extracted")
+NEEDS_SQL = pytest.mark.skipif(
+    not sql_available(), reason="SafetyNet canonical layer not reachable"
+)
 
 
 def launch(timeout: int = 300) -> AppTest:
@@ -17,10 +21,15 @@ def launch(timeout: int = 300) -> AppTest:
     return app
 
 
-def select_mimic(app: AppTest) -> AppTest:
+def select_cohort(app: AppTest, *tokens: str) -> AppTest:
     cohort = app.radio("source_radio")
-    cohort.set_value(next(o for o in cohort.options if "MIMIC" in o)).run()
+    matching = next(o for o in cohort.options if all(t in o for t in tokens))
+    cohort.set_value(matching).run()
     return app
+
+
+def select_mimic(app: AppTest) -> AppTest:
+    return select_cohort(app, "MIMIC")
 
 
 def test_app_renders_without_exceptions():
@@ -61,3 +70,17 @@ def test_real_mimic_reports_dark_triggers():
     """Coverage must call out triggers this dataset cannot support."""
     app = select_mimic(launch(timeout=600))
     assert any("Not derivable" in error.value for error in app.error)
+
+
+@NEEDS_SQL
+def test_sql_mimic_cohort_renders_and_still_drops_the_note_reader():
+    app = select_cohort(launch(timeout=600), "MIMIC", "SQL Server")
+    assert not app.exception
+    assert any("no clinical notes" in info.value for info in app.info)
+
+
+@NEEDS_SQL
+def test_sql_synthetic_cohort_keeps_the_note_reader():
+    app = select_cohort(launch(timeout=600), "Synthetic", "SQL Server")
+    assert not app.exception
+    assert not any("no clinical notes" in info.value for info in app.info)
