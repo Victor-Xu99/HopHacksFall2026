@@ -24,6 +24,8 @@ Windows authentication only; nothing here reads or writes a credential.
 
 from __future__ import annotations
 
+import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -44,7 +46,9 @@ except ModuleNotFoundError:
 
 from src.domain.models import PatientCase, PatientEvent
 
-DEFAULT_SERVER = r".\SQLEXPRESS"
+logger = logging.getLogger(__name__)
+
+DEFAULT_SERVER = os.environ.get("SAFETYNET_SQL_SERVER", r".\SQLEXPRESS")
 DEFAULT_DATABASE = "SafetyNet"
 DRIVER = "ODBC Driver 17 for SQL Server"
 CORE_SCHEMA = "core"
@@ -128,6 +132,10 @@ def ensure_schema(engine: Engine, schema: str) -> None:
 def available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) -> bool:
     """True when the canonical layer can be read right now, like mimic.mimic_available()."""
     if not _SQL_DEPS_AVAILABLE:
+        logger.warning(
+            "SafetyNet SQL unavailable: pyodbc/sqlalchemy are not installed. "
+            "Run `pip install sqlalchemy pyodbc`."
+        )
         return False
     try:
         with pyodbc.connect(
@@ -139,7 +147,15 @@ def available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) ->
                 ).fetchone()[0]
                 is not None
             )
-    except pyodbc.Error:
+    except pyodbc.Error as exc:
+        logger.warning(
+            "SafetyNet SQL unavailable: cannot reach %s/%s (%s). Set SAFETYNET_SQL_SERVER "
+            "to your instance name.",
+            server,
+            database,
+            str(exc).split(";")[0],
+        )
+        logger.debug("SafetyNet SQL connection traceback", exc_info=True)
         return False
 
 

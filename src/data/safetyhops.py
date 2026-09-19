@@ -15,9 +15,17 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+import logging
+import os
+
 from src.domain.models import PatientCase, PatientEvent
 
-DEFAULT_SERVER = r".\SQLEXPRESS"
+logger = logging.getLogger(__name__)
+
+# Override with SAFETYNET_SQL_SERVER in your shell / .env to match your local
+# SQL Server instance name.  The teammate default is .\SQLEXPRESS; locally you
+# may need .\XUSHOE or just the bare instance name.
+DEFAULT_SERVER = os.environ.get("SAFETYNET_SQL_SERVER", r".\SQLEXPRESS")
 DEFAULT_DATABASE = "SafetyHops"
 DRIVER = "ODBC Driver 17 for SQL Server"
 
@@ -48,13 +56,52 @@ HARM_CONDITIONS = frozenset(
 READMISSION_WINDOW_DAYS = 30
 
 
+def _driver_message(exc: BaseException) -> str:
+    """The ODBC driver's complaint, without SQLAlchemy's wrapper and repeated clauses."""
+    text = str(getattr(exc, "orig", exc))
+    for marker in ("[SQL Server]", "[ODBC Driver 17 for SQL Server]"):
+        if marker in text:
+            text = text.split(marker, 1)[1]
+            break
+    return text.split(";")[0].strip(" '\")") or exc.__class__.__name__
+
+
 def hops_available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) -> bool:
     try:
         from sqlalchemy import create_engine  # noqa: PLC0415
+    except ModuleNotFoundError as exc:
+        # A missing package and an unreachable server both end in "not available",
+        # but only one of them is fixed with pip.
+        logger.warning(
+            "SafetyHops unavailable: %s is not installed. Run `pip install sqlalchemy pyodbc`.",
+            exc.name,
+        )
+        return False
+
+    try:
         engine = create_engine(_connection_url(server, database))
         with engine.connect() as connection:
-            return connection.exec_driver_sql("SELECT OBJECT_ID('dbo.encounters', 'U')").scalar() is not None
-    except Exception:
+            found = connection.exec_driver_sql("SELECT OBJECT_ID('dbo.encounters', 'U')").scalar()
+        if found is None:
+            logger.warning(
+                "SafetyHops unavailable: connected to %s/%s but dbo.encounters does not exist.",
+                server,
+                database,
+            )
+            return False
+        return True
+    except Exception as exc:
+        # The driver's own message is the diagnostic; the traceback through
+        # SQLAlchemy's connect stack is noise unless you are debugging this file.
+        logger.warning(
+            "SafetyHops unavailable: cannot reach %s/%s (%s). Set SAFETYNET_SQL_SERVER to "
+            "your instance name: default instances take the bare machine name, named "
+            "instances take .\\NAME.",
+            server,
+            database,
+            _driver_message(exc),
+        )
+        logger.debug("SafetyHops connection traceback", exc_info=True)
         return False
 
 
