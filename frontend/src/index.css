@@ -292,6 +292,34 @@ button {
   border-bottom: 1px solid var(--line);
 }
 
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-right: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-head h2 {
+  border-bottom: 0;
+  padding-right: 0;
+}
+
+.panel-head button {
+  background: var(--teal-2);
+  color: #042422;
+  border: 0;
+  border-radius: 10px;
+  padding: 7px 12px;
+  font-weight: 600;
+}
+
+.panel-head button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
 .list {
   max-height: 720px;
   overflow: auto;

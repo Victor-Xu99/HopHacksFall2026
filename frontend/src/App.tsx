@@ -3,6 +3,8 @@ import type { Review, ReviewPayload, Source } from "./types";
 
 type MainTab = "queue" | "import" | "more";
 
+const LIST_LIMIT = 10;
+
 const shortId = (id: string) => (id.length > 12 ? `${id.slice(0, 8)}...` : id);
 const plain = (text: string) => text.replace(/\*\*/g, "");
 
@@ -32,7 +34,6 @@ export default function App() {
   const [sources, setSources] = useState<Source[]>([]);
   const [source, setSource] = useState("safetyhops");
   const [modelType, setModelType] = useState("logistic");
-  const [limit, setLimit] = useState(20);
   const [data, setData] = useState<ReviewPayload | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -127,7 +128,7 @@ export default function App() {
     setError("");
     try {
       const res = await fetch(
-        `/api/review?source=${encodeURIComponent(nextSource)}&model_type=${modelType}&limit=${limit}`
+        `/api/review?source=${encodeURIComponent(nextSource)}&model_type=${modelType}&limit=${LIST_LIMIT}`
       );
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -189,19 +190,6 @@ export default function App() {
             <h1>SafetyNet</h1>
             <p>Charts that may need a second look after discharge</p>
           </div>
-        </div>
-        <div className="controls">
-          <label>
-            How many to show
-            <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
-              <option value={10}>10</option>
-              <option value={20}>20</option>
-              <option value={40}>40</option>
-            </select>
-          </label>
-          <button type="button" onClick={() => loadReview()} disabled={loading}>
-            {loading ? "Checking stays..." : "Refresh list"}
-          </button>
         </div>
       </header>
 
@@ -381,13 +369,18 @@ export default function App() {
             <div className="metric">
               <span>On this list</span>
               <strong>{data?.top_reviews ?? "-"}</strong>
-              <small>Highest-priority stays for you to review, up to {limit}.</small>
+              <small>The 10 highest-priority stays for you to review.</small>
             </div>
           </section>
 
           <section className="layout">
             <div className="panel">
-              <h2>Review list</h2>
+              <div className="panel-head">
+                <h2>Review list</h2>
+                <button type="button" onClick={() => loadReview()} disabled={loading}>
+                  {loading ? "Checking stays..." : "Refresh list"}
+                </button>
+              </div>
               {!data && !loading ? (
                 <div className="status">
                   Press Refresh list, or import records first. Highest-priority stays show at the top.
