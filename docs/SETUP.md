@@ -101,6 +101,26 @@ python -m pytest tests -q
 Tests that require the MIMIC files or SQL Server skip cleanly when those are
 missing, so a clean checkout with no dataset still passes.
 
+## 6. React review dashboard
+
+The Streamlit app is still there. The newer UI is a teal React dashboard that
+talks to a FastAPI wrapper around the same scoring code.
+
+```bash
+pip install -r requirements.txt
+python -m uvicorn api:app --reload --port 8000
+```
+
+In a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:5173. Vite proxies `/api` to the FastAPI server.
+
 ## Troubleshooting
 
 **A new database does not appear in SSMS.** Object Explorer caches the tree and

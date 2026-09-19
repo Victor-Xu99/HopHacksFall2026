@@ -48,7 +48,7 @@ def test_switching_to_the_decision_tree_still_renders():
 
 def test_threshold_queue_mode_renders():
     app = launch()
-    app.radio("queue_mode").set_value("Score threshold").run()
+    app.radio("queue_mode").set_value("A score cutoff").run()
     assert not app.exception
 
 

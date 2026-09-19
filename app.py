@@ -239,33 +239,64 @@ def render_review_queue(scored: pd.DataFrame, watcher, reader, model, source: st
 
     if mode == "capacity":
         flagged = scored.head(capacity)
-        caption = f"Top {capacity} cases by score, sized to one review cycle."
+        caption = (
+            f"Showing the {capacity} stays the tool scored highest. "
+            "That is the list a reviewer would open this cycle."
+        )
     else:
         flagged = scored[scored["score"] >= threshold]
-        caption = f"Cases scoring at or above {threshold:.2f}."
+        caption = (
+            f"Showing every stay whose score is at least {threshold:.2f}."
+        )
+
+    tagged_on_list = int(flagged["label"].sum()) if len(flagged) else 0
+    tagged_in_all = int(scored["label"].sum())
+    share_on_list = flagged["label"].mean() if len(flagged) else 0.0
+    share_overall = scored["label"].mean() if len(scored) else 0.0
 
     a, b, c, d = st.columns(4)
-    a.metric("Cases scanned", len(scored))
-    b.metric("In the queue", len(flagged))
-    hit_rate = flagged["label"].mean() if len(flagged) else 0.0
-    base = scored["label"].mean()
-    c.metric("Queue hit rate", f"{hit_rate:.0%}", delta=f"{hit_rate - base:+.0%} vs base")
-    d.metric("Caught", f"{int(flagged['label'].sum())}/{int(scored['label'].sum())}")
+    a.metric(
+        "Stays the tool checked",
+        len(scored),
+        help="Every patient stay in this dataset, scored from highest concern to lowest.",
+    )
+    b.metric(
+        "Top Reviews",
+        len(flagged),
+        help="How many of those stays you asked to look at now. Highest scores go first.",
+    )
+    c.metric(
+        "Already tagged as harm",
+        f"{share_on_list:.0%}",
+        help=(
+            f"Of the stays on this review list, how many already have a harm tag in the data "
+            f"({label_name}). About {share_overall:.0%} of all stays have that tag, "
+            "so a random list of the same length would land near that lower number."
+        ),
+    )
+    d.metric(
+        "Tagged stays this list found",
+        f"{tagged_on_list} of {tagged_in_all}",
+        help=(
+            f"There are {tagged_in_all} stays in the whole dataset that already have a harm tag. "
+            f"This short list includes {tagged_on_list} of them."
+        ),
+    )
     st.caption(caption)
-
     st.caption(
-        f"Hit rate counts cases carrying the {label_name}. In deployment this comes from "
-        "reviewer adjudication of this queue, which is also what would retrain the model."
+        f"“Already tagged as harm” means the stay has a {label_name} in the dataset. "
+        "It does not mean a doctor missed something. It means the tag was already there, "
+        "and we are checking whether the short list is full of those tagged stays."
     )
 
     if not len(flagged):
-        st.info("Nothing in the queue. Widen the capacity or lower the threshold.")
+        st.info("This review list is empty. Raise how many stays to review, or lower the score cutoff.")
         return
 
     for _, row in flagged.iterrows():
         header = (
             f"{row['case_id']} · age {row['age']}{row['gender']} · "
-            f"score {row['score']:.2f} · {label_name}={row['label']}"
+            f"score {row['score']:.2f} · harm tag: {'yes' if row['label'] else 'no'}"
         )
         with st.expander(header):
             render_evidence(row["case_obj"], watcher, reader, model)
@@ -532,26 +563,28 @@ def sidebar():
             key="model_family",
         )
 
-        st.header("Review queue")
+        st.header("Review list")
         mode_label = st.radio(
-            "Size the queue by", ["Review capacity", "Score threshold"], key="queue_mode"
+            "How to pick stays for review",
+            ["A fixed number of stays", "A score cutoff"],
+            key="queue_mode",
         )
-        mode = "capacity" if mode_label == "Review capacity" else "threshold"
+        mode = "capacity" if mode_label == "A fixed number of stays" else "threshold"
         capacity = 20
         threshold = 0.40
         if mode == "capacity":
             capacity = int(
                 st.number_input(
-                    "Cases per review cycle",
+                    "How many stays to review",
                     min_value=5,
                     max_value=300,
                     value=20,
                     step=5,
-                    help="Reviewers have fixed hours. Size the queue to them, not to a cutoff.",
+                    help="A reviewer only has time for a short list. Highest scores go first.",
                 )
             )
         else:
-            threshold = st.slider("Threshold", 0.05, 0.95, 0.40, step=0.05)
+            threshold = st.slider("Minimum score to include", 0.05, 0.95, 0.40, step=0.05)
 
     return source, num_cases, harm_ratio, hard_negative_ratio, seed, model_type, (
         mode,
@@ -599,7 +632,7 @@ def main() -> None:
         )
 
     queue_tab, model_tab, coverage_tab, note_tab = st.tabs(
-        ["Review queue", "Model performance", "Data coverage", "Note reader"]
+        ["Review list", "Model performance", "Data coverage", "Note reader"]
     )
     with queue_tab:
         render_review_queue(scored, watcher, reader, model, source, queue)

@@ -9,3 +9,5 @@ pytest
 # pyodbc also needs the "ODBC Driver 17 for SQL Server" system driver installed.
 sqlalchemy
 pyodbc
+fastapi
+uvicorn
