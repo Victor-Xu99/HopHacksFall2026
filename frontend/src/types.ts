@@ -50,6 +50,26 @@ export type CoverageRow = {
   lift: number | null;
 };
 
+export type TrainingReport = {
+  n_train: number;
+  n_test: number;
+  roc_auc: number;
+  average_precision: number;
+  /** PR AUC of a model guessing at the base rate. ROC's equivalent is always 0.5. */
+  pr_baseline: number;
+  /** average_precision / pr_baseline. 1.0 means no better than chance. */
+  pr_lift: number;
+  recall: number;
+  precision: number;
+  cv_roc_auc_mean: number;
+  cv_roc_auc_std: number;
+  cv_average_precision_mean: number;
+  cv_average_precision_std: number;
+  brier: number;
+  positive_rate: number;
+  threshold: number;
+};
+
 export type ReviewPayload = {
   source: string;
   label_name: string;
@@ -61,6 +81,7 @@ export type ReviewPayload = {
   tagged_found: number;
   tagged_total: number;
   reviews: Review[];
+  report: TrainingReport | null;
   coverage: CoverageRow[];
   model_type: string;
 };

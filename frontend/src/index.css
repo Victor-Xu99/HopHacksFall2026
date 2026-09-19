@@ -149,6 +149,15 @@ button {
   font-weight: 600;
 }
 
+/* A metric like PR AUC is unreadable without what it is being measured against. */
+.metric small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
 .layout {
   display: grid;
   grid-template-columns: 360px 1fr;

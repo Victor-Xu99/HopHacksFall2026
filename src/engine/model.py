@@ -26,7 +26,7 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
 from sklearn.tree import DecisionTreeClassifier, export_text
 
 from src.domain.models import PatientCase
@@ -53,12 +53,30 @@ class TrainingReport:
     confusion: Tuple[int, int, int, int]  # tn, fp, fn, tp
     cv_roc_auc_mean: float
     cv_roc_auc_std: float
+    cv_average_precision_mean: float = float("nan")
+    cv_average_precision_std: float = float("nan")
     threshold_sweep: List[Dict[str, float]] = field(default_factory=list)
+
+    @property
+    def pr_baseline(self) -> float:
+        """What PR AUC a coin weighted to the base rate would score.
+
+        ROC AUC always nulls at 0.50; PR AUC nulls at the positive rate, so the
+        same 0.74 is unremarkable on a balanced cohort and strong on a rare one.
+        Reporting the number without this is reporting half of it.
+        """
+        return self.positive_rate
+
+    @property
+    def pr_lift(self) -> float:
+        """PR AUC over its own baseline. 1.0 means no better than chance."""
+        return self.average_precision / self.positive_rate if self.positive_rate else float("nan")
 
     def summary(self) -> str:
         return (
             f"{self.model_type} | held-out ROC AUC {self.roc_auc:.3f} | "
-            f"PR AUC {self.average_precision:.3f} | "
+            f"PR AUC {self.average_precision:.3f} "
+            f"({self.pr_lift:.2f}x over a {self.pr_baseline:.1%} base rate) | "
             f"recall {self.recall:.2f} at threshold {self.threshold:.2f}"
         )
 
@@ -168,16 +186,22 @@ class HarmScoringModel(ScoringModel):
 
         folds = min(5, int(np.bincount(y).min()))
         if folds >= 2:
-            cv = cross_val_score(
+            # Both metrics from one pass over the folds. PR AUC needs the
+            # cross-validated form more than ROC does: it is the noisier of the
+            # two on a small positive class, which is exactly when it is read.
+            cv = cross_validate(
                 self._fresh_estimator(),
                 X,
                 y,
                 cv=StratifiedKFold(n_splits=folds, shuffle=True, random_state=self.random_state),
-                scoring="roc_auc",
+                scoring=("roc_auc", "average_precision"),
             )
-            cv_mean, cv_std = float(cv.mean()), float(cv.std())
+            cv_mean = float(cv["test_roc_auc"].mean())
+            cv_std = float(cv["test_roc_auc"].std())
+            cv_ap_mean = float(cv["test_average_precision"].mean())
+            cv_ap_std = float(cv["test_average_precision"].std())
         else:
-            cv_mean = cv_std = float("nan")
+            cv_mean = cv_std = cv_ap_mean = cv_ap_std = float("nan")
 
         sweep = []
         for cut in np.arange(0.1, 0.95, 0.05):
@@ -210,6 +234,8 @@ class HarmScoringModel(ScoringModel):
             confusion=(int(tn), int(fp), int(fn), int(tp)),
             cv_roc_auc_mean=cv_mean,
             cv_roc_auc_std=cv_std,
+            cv_average_precision_mean=cv_ap_mean,
+            cv_average_precision_std=cv_ap_std,
             threshold_sweep=sweep,
         )
 

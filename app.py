@@ -327,20 +327,51 @@ def render_model_tab(model, scored: pd.DataFrame, source: str) -> None:
 
     a, b, c, d = st.columns(4)
     a.metric("ROC AUC (held out)", f"{report.roc_auc:.3f}")
-    b.metric("PR AUC (held out)", f"{report.average_precision:.3f}")
+    b.metric(
+        "PR AUC (held out)",
+        f"{report.average_precision:.3f}",
+        delta=f"{report.pr_lift:.2f}x baseline",
+        help=(
+            "Area under the precision-recall curve. Unlike ROC AUC, which always "
+            f"nulls at 0.500, this one nulls at the {report.pr_baseline:.1%} label "
+            "prevalence, so the multiple beside it is the part that carries meaning."
+        ),
+    )
     c.metric(f"Recall @ {report.threshold:.2f}", f"{report.recall:.2f}")
     d.metric(f"Precision @ {report.threshold:.2f}", f"{report.precision:.2f}")
 
-    e, f, g = st.columns(3)
+    e, f, g, h = st.columns(4)
     e.metric(
         "Cross-validated ROC AUC", f"{report.cv_roc_auc_mean:.3f} ± {report.cv_roc_auc_std:.3f}"
     )
-    f.metric("Brier score", f"{report.brier:.3f}", help="Calibration error; lower is better.")
-    g.metric("Label prevalence", f"{report.positive_rate:.1%}")
+    f.metric(
+        "Cross-validated PR AUC",
+        f"{report.cv_average_precision_mean:.3f} ± {report.cv_average_precision_std:.3f}",
+        help="The noisier of the two metrics when positives are scarce, so the spread matters.",
+    )
+    g.metric("Brier score", f"{report.brier:.3f}", help="Calibration error; lower is better.")
+    h.metric(
+        "Label prevalence",
+        f"{report.positive_rate:.1%}",
+        help="Also the PR AUC baseline: what a model that guessed at the base rate would score.",
+    )
+
+    st.caption(
+        f"PR AUC is the metric to read here. This is a ranking problem under a fixed review "
+        f"budget, and ROC AUC flatters a model when positives are scarce. At a "
+        f"{report.pr_baseline:.1%} base rate, chance scores {report.pr_baseline:.3f} and this "
+        f"model scores {report.average_precision:.3f}."
+    )
+    if report.positive_rate > 0.30:
+        st.warning(
+            f"This cohort is {report.positive_rate:.0%} positive, far denser than harm in a real "
+            "hospital population. Both AUCs, and PR AUC especially, will read lower against a "
+            "realistic base rate of a few percent."
+        )
     if report.n_test < 150:
         st.caption(
             "With a held-out set this small, the single-split numbers are noisy. The "
-            "cross-validated figure is the one to trust."
+            "cross-validated figures are the ones to trust."
         )
 
     tn, fp, fn, tp = report.confusion
