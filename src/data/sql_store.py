@@ -24,18 +24,31 @@ Windows authentication only; nothing here reads or writes a credential.
 
 from __future__ import annotations
 
+import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-import pyodbc
-from sqlalchemy import create_engine, event, text
-from sqlalchemy.engine import Engine
+try:
+    import pyodbc as pyodbc
+    from sqlalchemy import create_engine, event, text
+    from sqlalchemy.engine import Engine
+    _SQL_DEPS_AVAILABLE = True
+except ModuleNotFoundError:
+    pyodbc = None  # type: ignore[assignment]
+    create_engine = None  # type: ignore[assignment]
+    event = None  # type: ignore[assignment]
+    text = None  # type: ignore[assignment]
+    Engine = None  # type: ignore[assignment,misc]
+    _SQL_DEPS_AVAILABLE = False
 
 from src.domain.models import PatientCase, PatientEvent
 
-DEFAULT_SERVER = r".\SQLEXPRESS"
+logger = logging.getLogger(__name__)
+
+DEFAULT_SERVER = os.environ.get("SAFETYNET_SQL_SERVER", r".\SQLEXPRESS")
 DEFAULT_DATABASE = "SafetyNet"
 DRIVER = "ODBC Driver 17 for SQL Server"
 CORE_SCHEMA = "core"
@@ -118,6 +131,12 @@ def ensure_schema(engine: Engine, schema: str) -> None:
 
 def available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) -> bool:
     """True when the canonical layer can be read right now, like mimic.mimic_available()."""
+    if not _SQL_DEPS_AVAILABLE:
+        logger.warning(
+            "SafetyNet SQL unavailable: pyodbc/sqlalchemy are not installed. "
+            "Run `pip install sqlalchemy pyodbc`."
+        )
+        return False
     try:
         with pyodbc.connect(
             odbc_connection_string(server, database), timeout=5
@@ -128,7 +147,15 @@ def available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) ->
                 ).fetchone()[0]
                 is not None
             )
-    except pyodbc.Error:
+    except pyodbc.Error as exc:
+        logger.warning(
+            "SafetyNet SQL unavailable: cannot reach %s/%s (%s). Set SAFETYNET_SQL_SERVER "
+            "to your instance name.",
+            server,
+            database,
+            str(exc).split(";")[0],
+        )
+        logger.debug("SafetyNet SQL connection traceback", exc_info=True)
         return False
 
 
@@ -295,15 +322,19 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 # DATETIME-shaped, which rounds sub-second values and would make the SQL timeline
 # disagree with the CSV one. NVARCHAR(MAX) has to be declared as an unsized
 # WVARCHAR or fast_executemany refuses to bind it.
-_EVENT_INPUT_SIZES = [
-    None,
-    None,
-    None,
-    None,
-    (pyodbc.SQL_TYPE_TIMESTAMP, 26, 6),
-    None,
-    (pyodbc.SQL_WVARCHAR, 0, 0),
-]
+_EVENT_INPUT_SIZES = (
+    [
+        None,
+        None,
+        None,
+        None,
+        (pyodbc.SQL_TYPE_TIMESTAMP, 26, 6),
+        None,
+        (pyodbc.SQL_WVARCHAR, 0, 0),
+    ]
+    if _SQL_DEPS_AVAILABLE
+    else []
+)
 
 
 def _executemany(cursor, statement: str, rows: Sequence[tuple], batch_size: int) -> None:
