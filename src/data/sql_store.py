@@ -1,12 +1,15 @@
 """The canonical layer: one shape every source maps into, so the engine stays source-agnostic.
 
-The `SafetyNet` database holds two layers. Raw schemas (`mimic_hosp`, `mimic_icu`,
-and whatever a future source brings) keep each source verbatim and are never
-required to agree with one another. Schema `core` is the contract: an adapter's
-only job is to produce `PatientCase` objects, and `write_cases` lands them in the
-same four tables regardless of where they came from. `read_cases` hands back the
-same objects, so `src/engine/*` never learns whether a cohort arrived from a CSV,
-from MIMIC in SQL, or from a generator.
+The hospital product uses a core-only database (default `SafetyNetQA`). Optional
+MIMIC loads can live in a separate `SafetyNet` database with raw `mimic_*`
+schemas; the engine never reads those. Schema `core` is the contract: an
+adapter's only job is to produce `PatientCase` objects, and `write_cases` lands
+them in the same tables regardless of where they came from. `read_cases` hands
+back the same objects, so `src/engine/*` never learns whether a cohort arrived
+from a CSV, from MIMIC in SQL, or from a generator.
+
+Set `SAFETYNET_SQL_DATABASE` to point at a different catalog without touching
+the MIMIC copy.
 
 Four tables, because the loop this project describes needs all four:
 
@@ -49,7 +52,7 @@ from src.domain.models import PatientCase, PatientEvent
 logger = logging.getLogger(__name__)
 
 DEFAULT_SERVER = os.environ.get("SAFETYNET_SQL_SERVER", r".\SQLEXPRESS")
-DEFAULT_DATABASE = "SafetyNet"
+DEFAULT_DATABASE = os.environ.get("SAFETYNET_SQL_DATABASE", "SafetyNetQA")
 DRIVER = "ODBC Driver 17 for SQL Server"
 CORE_SCHEMA = "core"
 
@@ -150,7 +153,7 @@ def available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) ->
     except pyodbc.Error as exc:
         logger.warning(
             "SafetyNet SQL unavailable: cannot reach %s/%s (%s). Set SAFETYNET_SQL_SERVER "
-            "to your instance name.",
+            "and SAFETYNET_SQL_DATABASE if your instance or catalog is not the default.",
             server,
             database,
             str(exc).split(";")[0],

@@ -58,3 +58,7 @@ Or `POST /api/hospital/upload` with the four files, or `POST /api/hospital/inges
 The teal dashboard source **Hospital extract (rank after discharge)** lists only
 stays that already have a discharge time. The ranker is fit on the synthetic
 cohort because hospital extracts do not carry training labels.
+
+SQL catalog is `SafetyNetQA` by default (`core` only). Create it with
+`python -m scripts.init_core_db`. A leftover MIMIC load in database `SafetyNet`
+is unused by this path.

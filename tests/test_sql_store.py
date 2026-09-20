@@ -31,10 +31,23 @@ NEEDS_MIMIC = pytest.mark.skipif(not mimic_available(), reason="MIMIC-IV demo no
 NEEDS_SQL = pytest.mark.skipif(
     not sql_available(), reason="SafetyNet canonical layer not reachable"
 )
-
-# Anything this module writes goes under its own source tag and is deleted again,
-# so a run never touches the cohorts the app reads.
 TEST_SOURCE = "pytest_roundtrip"
+
+
+def _mimic_loaded_in_default_catalog() -> bool:
+    if not sql_available():
+        return False
+    engine = build_engine()
+    try:
+        return source_counts(engine).get(MIMIC_SOURCE, 0) > 0
+    finally:
+        engine.dispose()
+
+
+NEEDS_MIMIC_SQL = pytest.mark.skipif(
+    not _mimic_loaded_in_default_catalog(),
+    reason="MIMIC cohort is not in the default SQL catalog (core-only SafetyNetQA is expected)",
+)
 
 
 @pytest.fixture(scope="module")
@@ -184,6 +197,7 @@ class TestRoundTrip:
 
 @NEEDS_SQL
 @NEEDS_MIMIC
+@NEEDS_MIMIC_SQL
 class TestCsvEquivalence:
     """The main deliverable: SQL and CSV have to agree at every layer."""
 
@@ -211,6 +225,7 @@ class TestCsvEquivalence:
 
 
 @NEEDS_SQL
+@NEEDS_MIMIC_SQL
 def test_source_counts_sees_the_built_cohorts(engine) -> None:
     counts = source_counts(engine)
     assert counts.get(MIMIC_SOURCE, 0) > 0

@@ -59,7 +59,33 @@ Note that this release **excludes clinical notes** by design — they ship as a
 separate credentialed dataset. On real records the note reader is therefore
 excluded from the model rather than fed empty features.
 
-## 4. Optional: load into SQL Server
+## 4. Hospital SQL (core only)
+
+The review queue stores stays in SQL Server. That catalog is **`SafetyNetQA`**
+by default: schema `core` only (`cases`, `events`, `scores`,
+`score_contributions`, `reviews`). It is not the MIMIC dump.
+
+If you previously loaded MIMIC into a database named `SafetyNet`, leave it.
+Point this app at `SafetyNetQA` instead:
+
+```powershell
+# optional; SafetyNetQA is already the default
+$env:SAFETYNET_SQL_DATABASE = "SafetyNetQA"
+python -m scripts.init_core_db
+python -m scripts.ingest_hospital --dir tests/fixtures/hospital/mixed_dates
+```
+
+Then start the API in a terminal that sees the same env var (or the default).
+Do not commit a `.env`.
+
+To use a different catalog or instance:
+
+```powershell
+$env:SAFETYNET_SQL_SERVER = ".\SQLEXPRESS"
+$env:SAFETYNET_SQL_DATABASE = "SafetyNetQA"
+```
+
+## 4b. Optional: load MIMIC into a separate SQL database
 
 Confirm SQL Server is reachable first. The default instance name used throughout is
 `.\SQLEXPRESS`:
@@ -81,7 +107,7 @@ python -m scripts.load_mimic_sql --zip C:\path\to\mimic-iv-clinical-database-dem
 # a single table, useful for a quick smoke test
 python -m scripts.load_mimic_sql --only hosp/patients hosp/admissions
 
-# a different target database
+# keep MIMIC off the hospital catalog
 python -m scripts.load_mimic_sql --database SafetyNet
 ```
 
@@ -123,11 +149,12 @@ Open http://localhost:5173. Vite proxies `/api` to the FastAPI server.
 
 ## 7. Hospital extract (rank after discharge)
 
-See [HOSPITAL_EXTRACT.md](HOSPITAL_EXTRACT.md). Four CSVs go into SafetyNet SQL.
-A stay is stored while `discharged` is blank and ranked only after that field is
-filled in.
+See [HOSPITAL_EXTRACT.md](HOSPITAL_EXTRACT.md). Four CSVs go into `SafetyNetQA`
+(`core` only). A stay is stored while `discharged` is blank and ranked only after
+that field is filled in.
 
 ```bash
+python -m scripts.init_core_db
 python -m scripts.ingest_hospital --dir tests/fixtures/hospital/in_house
 python -m scripts.ingest_hospital --dir tests/fixtures/hospital/discharged
 ```

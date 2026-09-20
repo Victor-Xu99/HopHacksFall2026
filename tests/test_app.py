@@ -8,6 +8,30 @@ from streamlit.testing.v1 import AppTest
 from src.data.mimic import mimic_available
 from src.data.safetyhops import hops_available
 from src.data.sql_store import available as sql_available
+from src.data.sql_store import source_counts
+
+APP = str(Path(__file__).resolve().parent.parent / "app.py")
+NEEDS_MIMIC = pytest.mark.skipif(not mimic_available(), reason="MIMIC-IV demo not extracted")
+NEEDS_SQL = pytest.mark.skipif(
+    not sql_available(), reason="SafetyNet canonical layer not reachable"
+)
+NEEDS_HOPS = pytest.mark.skipif(not hops_available(), reason="SafetyHops database not reachable")
+
+
+def _sql_sources() -> dict:
+    if not sql_available():
+        return {}
+    return source_counts()
+
+
+NEEDS_SQL_MIMIC = pytest.mark.skipif(
+    _sql_sources().get("mimic_iv_demo", 0) == 0,
+    reason="MIMIC is not loaded into the default SQL catalog",
+)
+NEEDS_SQL_SYNTHETIC = pytest.mark.skipif(
+    _sql_sources().get("synthetic", 0) == 0,
+    reason="synthetic SQL cohort is not in the default catalog",
+)
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 NEEDS_MIMIC = pytest.mark.skipif(not mimic_available(), reason="MIMIC-IV demo not extracted")
@@ -75,6 +99,7 @@ def test_real_mimic_reports_dark_triggers():
 
 
 @NEEDS_SQL
+@NEEDS_SQL_MIMIC
 def test_sql_mimic_cohort_renders_and_still_drops_the_note_reader():
     app = select_cohort(launch(timeout=600), "MIMIC", "SQL Server")
     assert not app.exception
@@ -82,6 +107,7 @@ def test_sql_mimic_cohort_renders_and_still_drops_the_note_reader():
 
 
 @NEEDS_SQL
+@NEEDS_SQL_SYNTHETIC
 def test_sql_synthetic_cohort_keeps_the_note_reader():
     app = select_cohort(launch(timeout=600), "Synthetic", "SQL Server")
     assert not app.exception
