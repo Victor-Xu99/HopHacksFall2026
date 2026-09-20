@@ -12,6 +12,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.data.generator import generate_dataset
+from src.engine.lift import compute_lift_curve, lift_multiple, random_baseline
 from src.data.hospital_extract import HOSPITAL_SOURCE
 from src.data.mimic import load_mimic_cases, mimic_available
 from src.data.prevalence import OIG_PREVENTABLE_HARM_RATE, downsample_to_prevalence
@@ -310,6 +311,23 @@ def review_payload(source: str, model_type: str, limit: int) -> Dict[str, Any]:
 
     weights = model.feature_table()
 
+    # --- Lift / gain curve ------------------------------------------------
+    # Only meaningful when cases have ground-truth harm labels.
+    # Hospital extracts have no labels, so skip the curve rather than show zeros.
+    scored_pairs = [(float(row["score"]), bool(row["label"])) for row in scored]
+    has_labels = any(label for _, label in scored_pairs)
+
+    if has_labels:
+        model_curve = compute_lift_curve(scored_pairs)
+        rand_curve = random_baseline()
+        lift_10pct = lift_multiple(model_curve, 0.10)
+        lift_curve_payload = [{"x": pt.review_share, "y": pt.harm_found} for pt in model_curve]
+        random_curve_payload = [{"x": pt.review_share, "y": pt.harm_found} for pt in rand_curve]
+    else:
+        lift_curve_payload = []
+        random_curve_payload = []
+        lift_10pct = None
+
     return {
         "source": source,
         "label_name": LABEL_NAMES.get(source, "harm tag"),
@@ -326,4 +344,7 @@ def review_payload(source: str, model_type: str, limit: int) -> Dict[str, Any]:
         "weights": weights,
         "model_type": model_type,
         "can_review": can_review,
+        "lift_curve": lift_curve_payload,
+        "random_curve": random_curve_payload,
+        "lift_at_10pct": lift_10pct,
     }

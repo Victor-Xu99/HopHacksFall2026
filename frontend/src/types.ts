@@ -73,6 +73,11 @@ export type TrainingReport = {
   threshold: number;
 };
 
+export type LiftPoint = {
+  x: number; // fraction of cases reviewed
+  y: number; // fraction of harm events found
+};
+
 export type ReviewPayload = {
   source: string;
   label_name: string;
@@ -88,4 +93,7 @@ export type ReviewPayload = {
   coverage: CoverageRow[];
   model_type: string;
   can_review?: boolean;
+  lift_curve: LiftPoint[];
+  random_curve: LiftPoint[];
+  lift_at_10pct: number | null;
 };

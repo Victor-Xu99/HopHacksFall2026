@@ -1,5 +1,56 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Review, ReviewPayload, Source } from "./types";
+import type { LiftPoint, Review, ReviewPayload, Source } from "./types";
+
+// ---------- Lift / gain curve chart (pure SVG, no dependencies) ----------
+const W = 300, H = 220, PAD = 36;
+const ix = (x: number) => PAD + x * (W - PAD * 1.5);
+const iy = (y: number) => H - PAD - y * (H - PAD * 1.5);
+
+function pts(data: LiftPoint[]) {
+  return data.map((p) => `${ix(p.x).toFixed(1)},${iy(p.y).toFixed(1)}`).join(" ");
+}
+
+function LiftChart({ model, random, liftAt10 }: { model: LiftPoint[]; random: LiftPoint[]; liftAt10: number }) {
+  const ticks = [0, 0.25, 0.5, 0.75, 1.0];
+  return (
+    <div className="lift-chart-wrap">
+      <div className="lift-header">
+        <span className="lift-title">Harms found per charts reviewed</span>
+        <span className="lift-badge">{liftAt10.toFixed(1)}x lift at 10% review</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="lift-svg" aria-label="Lift curve">
+        {/* grid lines */}
+        {ticks.map((t) => (
+          <g key={t}>
+            <line x1={ix(t)} y1={iy(0)} x2={ix(t)} y2={iy(1)} stroke="#e5e7eb" strokeWidth="1" />
+            <line x1={ix(0)} y1={iy(t)} x2={ix(1)} y2={iy(t)} stroke="#e5e7eb" strokeWidth="1" />
+            <text x={ix(t)} y={iy(0) + 14} textAnchor="middle" fontSize="9" fill="#9ca3af">
+              {(t * 100).toFixed(0)}%
+            </text>
+            <text x={ix(0) - 4} y={iy(t) + 3} textAnchor="end" fontSize="9" fill="#9ca3af">
+              {(t * 100).toFixed(0)}%
+            </text>
+          </g>
+        ))}
+        {/* 10% review budget annotation */}
+        <line x1={ix(0.1)} y1={iy(0)} x2={ix(0.1)} y2={iy(1)} stroke="#f59e0b" strokeWidth="1" strokeDasharray="4 3" />
+        {/* random baseline */}
+        <polyline points={pts(random)} fill="none" stroke="#d1d5db" strokeWidth="1.5" strokeDasharray="5 3" />
+        {/* model curve */}
+        <polyline points={pts(model)} fill="none" stroke="#2563eb" strokeWidth="2.5" strokeLinejoin="round" />
+        {/* axis labels */}
+        <text x={W / 2} y={H - 2} textAnchor="middle" fontSize="10" fill="#6b7280">Charts reviewed</text>
+        <text x={10} y={H / 2} textAnchor="middle" fontSize="10" fill="#6b7280"
+          transform={`rotate(-90, 10, ${H / 2})`}>Harm found</text>
+        {/* legend */}
+        <line x1={ix(0.55)} y1={iy(0.08)} x2={ix(0.65)} y2={iy(0.08)} stroke="#2563eb" strokeWidth="2.5" />
+        <text x={ix(0.67)} y={iy(0.08) + 4} fontSize="9" fill="#374151">SafetyNet</text>
+        <line x1={ix(0.55)} y1={iy(0.02)} x2={ix(0.65)} y2={iy(0.02)} stroke="#d1d5db" strokeWidth="1.5" strokeDasharray="4 2" />
+        <text x={ix(0.67)} y={iy(0.02) + 4} fontSize="9" fill="#374151">Random</text>
+      </svg>
+    </div>
+  );
+}
 
 type MainTab = "queue" | "import" | "more";
 
@@ -376,6 +427,25 @@ export default function App() {
             </div>
           </section>
 
+          {data?.lift_at_10pct != null && data.lift_curve.length > 0 ? (
+            <LiftChart
+              model={data.lift_curve}
+              random={data.random_curve}
+              liftAt10={data.lift_at_10pct}
+            />
+          ) : data ? (
+            <div className="lift-chart-wrap">
+              <div className="lift-header">
+                <span className="lift-title">Harms found per charts reviewed</span>
+              </div>
+              <p style={{ fontSize: "0.82rem", color: "var(--muted)", margin: 0 }}>
+                Lift curve requires ground-truth harm labels. This source (hospital extract) has
+                none — cases are ranked by model score but outcomes are not yet known.
+                The curve will appear when using a labeled source like SafetyHops or Synthetic.
+              </p>
+            </div>
+          ) : null}
+
           <section className="layout">
             <div className="panel">
               <div className="panel-head">
@@ -453,6 +523,23 @@ export default function App() {
                       <span className="who">
                         {selected.age}-year-old {selected.gender}
                       </span>
+                    </div>
+                    <div className="score-row">
+                      <span className="score-label">Risk score</span>
+                      <span
+                        className="score-badge"
+                        style={{
+                          background:
+                            selected.score >= 0.7
+                              ? "#dc2626"
+                              : selected.score >= 0.4
+                              ? "#d97706"
+                              : "#16a34a",
+                        }}
+                      >
+                        {(selected.score * 100).toFixed(0)}
+                      </span>
+                      <span className="score-hint">out of 100 — higher means more likely to need review</span>
                     </div>
                     <p>
                       {selected.event_count} events on file.
