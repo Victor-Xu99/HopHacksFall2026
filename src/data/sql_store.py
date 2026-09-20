@@ -47,13 +47,15 @@ except ModuleNotFoundError:
     Engine = None  # type: ignore[assignment,misc]
     _SQL_DEPS_AVAILABLE = False
 
+from src import config
 from src.domain.models import PatientCase, PatientEvent
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SERVER = os.environ.get("SAFETYNET_SQL_SERVER", r".\SQLEXPRESS")
-DEFAULT_DATABASE = os.environ.get("SAFETYNET_SQL_DATABASE", "SafetyNetQA")
-DRIVER = "ODBC Driver 17 for SQL Server"
+# Set these in `.env` at the repository root; see src/config.py and .env.example.
+DEFAULT_SERVER = config.SQL_SERVER
+DEFAULT_DATABASE = config.SQL_DATABASE
+DRIVER = config.DRIVER
 CORE_SCHEMA = "core"
 
 DECISIONS = ("harm", "no_harm", "unclear")
