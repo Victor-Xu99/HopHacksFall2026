@@ -18,16 +18,15 @@ import pandas as pd
 import logging
 import os
 
+from src import config
 from src.domain.models import PatientCase, PatientEvent
 
 logger = logging.getLogger(__name__)
 
-# Override with SAFETYNET_SQL_SERVER in your shell / .env to match your local
-# SQL Server instance name.  The teammate default is .\SQLEXPRESS; locally you
-# may need .\XUSHOE or just the bare instance name.
-DEFAULT_SERVER = os.environ.get("SAFETYNET_SQL_SERVER", r".\SQLEXPRESS")
-DEFAULT_DATABASE = "SafetyHops"
-DRIVER = "ODBC Driver 17 for SQL Server"
+# Set these in `.env` at the repository root; see src/config.py and .env.example.
+DEFAULT_SERVER = config.SQL_SERVER
+DEFAULT_DATABASE = config.HOPS_DATABASE
+DRIVER = config.DRIVER
 
 
 def _connection_url(server: str, database: str) -> str:
