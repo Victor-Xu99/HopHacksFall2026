@@ -183,27 +183,28 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <div className="mark">SN</div>
-          <div>
-            <h1>SafetyNet</h1>
-            <p>Charts that may need a second look after discharge</p>
+      <div className="chrome">
+        <header className="topbar">
+          <div className="brand">
+            <div className="mark">SN</div>
+            <div>
+              <h1>SafetyNet</h1>
+              <p>Second look after discharge</p>
+            </div>
           </div>
-        </div>
-      </header>
-
-      <nav className="tabs" aria-label="Main sections">
-        <button type="button" className={tab === "queue" ? "tab active" : "tab"} onClick={() => setTab("queue")}>
-          Review list
-        </button>
-        <button type="button" className={tab === "import" ? "tab active" : "tab"} onClick={() => setTab("import")}>
-          Import records
-        </button>
-        <button type="button" className={tab === "more" ? "tab active" : "tab"} onClick={() => setTab("more")}>
-          Extra detail
-        </button>
-      </nav>
+        </header>
+        <nav className="tabs" aria-label="Main sections">
+          <button type="button" className={tab === "queue" ? "tab active" : "tab"} onClick={() => setTab("queue")}>
+            Review list
+          </button>
+          <button type="button" className={tab === "import" ? "tab active" : "tab"} onClick={() => setTab("import")}>
+            Import records
+          </button>
+          <button type="button" className={tab === "more" ? "tab active" : "tab"} onClick={() => setTab("more")}>
+            Extra detail
+          </button>
+        </nav>
+      </div>
 
       {error ? <div className="error">{error}</div> : null}
 
@@ -353,14 +354,16 @@ export default function App() {
               </div>
             </>
           ) : (
-            <div className="status">Load the review list first to see model numbers.</div>
+            <div className="status">
+              Refresh the review list first to see model numbers.
+            </div>
           )}
         </section>
       ) : null}
 
       {tab === "queue" ? (
         <>
-          <section className="metrics hero">
+          <section className="summary-strip" aria-label="Queue size">
             <div className="metric">
               <span>Stays the tool checked</span>
               <strong>{data?.checked ?? "-"}</strong>
@@ -383,10 +386,17 @@ export default function App() {
               </div>
               {!data && !loading ? (
                 <div className="status">
-                  Press Refresh list, or import records first. Highest-priority stays show at the top.
+                  No stays on the list yet.{" "}
+                  <button type="button" className="linkish" onClick={() => setTab("import")}>
+                    Import records
+                  </button>{" "}
+                  or press Refresh list. Highest-priority stays show at the top.
                 </div>
               ) : null}
               {loading ? <div className="status">Checking stays. The first load can take a minute.</div> : null}
+              {data && !loading && data.reviews.length === 0 ? (
+                <div className="status">The review list is empty. Import records or refresh after new discharges.</div>
+              ) : null}
               <div className="list">
                 {data?.reviews.map((row, index) => (
                   <div key={row.case_id} className={row.case_id === selectedId ? "row active" : "row"}>
@@ -430,7 +440,9 @@ export default function App() {
             <div className="panel">
               <h2>This stay</h2>
               {!selected ? (
-                <div className="status">Select a stay on the left.</div>
+                <div className="status">
+                  {loading ? "Checking stays." : "Select a stay on the left."}
+                </div>
               ) : (
                 <div className="detail">
                   <div>
@@ -453,6 +465,7 @@ export default function App() {
                       <div className="verdicts">
                         <button
                           type="button"
+                          className="harm"
                           onClick={() =>
                             markReviewed(selected.case_id, "harm").catch((err) =>
                               setError(err instanceof Error ? err.message : "Could not save review")
@@ -463,6 +476,7 @@ export default function App() {
                         </button>
                         <button
                           type="button"
+                          className="no-harm"
                           onClick={() =>
                             markReviewed(selected.case_id, "no_harm").catch((err) =>
                               setError(err instanceof Error ? err.message : "Could not save review")
@@ -473,6 +487,7 @@ export default function App() {
                         </button>
                         <button
                           type="button"
+                          className="unclear"
                           onClick={() =>
                             markReviewed(selected.case_id, "unclear").catch((err) =>
                               setError(err instanceof Error ? err.message : "Could not save review")
