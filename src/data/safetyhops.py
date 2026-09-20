@@ -11,7 +11,7 @@ was given.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -55,6 +55,9 @@ HARM_CONDITIONS = frozenset(
 
 READMISSION_WINDOW_DAYS = 30
 
+# Availability probes are memoized per (server, database); see `hops_available`.
+_AVAILABILITY_CACHE: Dict[Tuple[str, str], bool] = {}
+
 
 def _driver_message(exc: BaseException) -> str:
     """The ODBC driver's complaint, without SQLAlchemy's wrapper and repeated clauses."""
@@ -66,7 +69,25 @@ def _driver_message(exc: BaseException) -> str:
     return text.split(";")[0].strip(" '\")") or exc.__class__.__name__
 
 
+def reset_availability_cache() -> None:
+    """Forget prior probes, so a server that has come up is noticed."""
+    _AVAILABILITY_CACHE.clear()
+
+
 def hops_available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) -> bool:
+    """Probed once per (server, database) and remembered.
+
+    The dashboard asks several times per render and an unreachable server costs
+    a connect timeout on each ask, so repeating the probe both slows the page
+    and repeats one warning until it drowns everything else.
+    """
+    key = (server, database)
+    if key not in _AVAILABILITY_CACHE:
+        _AVAILABILITY_CACHE[key] = _probe(server, database)
+    return _AVAILABILITY_CACHE[key]
+
+
+def _probe(server: str, database: str) -> bool:
     try:
         from sqlalchemy import create_engine  # noqa: PLC0415
     except ModuleNotFoundError as exc:

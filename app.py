@@ -11,6 +11,7 @@ from src.data.generator import generate_dataset
 from src.data.hospital_adapt import write_bundle
 from src.data.hospital_extract import HOSPITAL_SOURCE, ingest_and_rank
 from src.data.mimic import MIMIC_ROOT_DEFAULT, load_mimic_cases, mimic_available
+from src.data.prevalence import OIG_PREVENTABLE_HARM_RATE, downsample_to_prevalence
 from src.data.safetyhops import hops_available, load_safetyhops_cases
 from src.data.sql_store import available as sql_available
 from src.data.sql_store import read_cases, record_review, reviewed_case_ids, source_counts
@@ -58,7 +59,14 @@ def sql_cohorts() -> Dict[str, int]:
 
 
 @st.cache_resource(show_spinner="Loading cohort...")
-def load_cases(source: str, num_cases: int, harm_ratio: float, hard_negative_ratio: float, seed: int):
+def load_cases(
+    source: str,
+    num_cases: int,
+    harm_ratio: float,
+    hard_negative_ratio: float,
+    seed: int,
+    target_prevalence: Optional[float] = None,
+):
     """Returns (cases, watcher, reader). The reader is None when there are no notes."""
     if source == MIMIC:
         cases = load_mimic_cases()
@@ -72,6 +80,10 @@ def load_cases(source: str, num_cases: int, harm_ratio: float, hard_negative_rat
 
     if source == SAFETYHOPS:
         cases = load_safetyhops_cases()
+        # The warehouse plants harm at ~46%, which contradicts the premise that
+        # harm is rare. Thin it to a realistic rate before anything is measured.
+        if target_prevalence:
+            cases = downsample_to_prevalence(cases, target_prevalence, seed)
         has_notes = any(e.event_type == "note" for case in cases for e in case.events)
         return (
             cases,
@@ -639,6 +651,7 @@ def render_note_reader_tab(reader: Optional[ClinicalNoteReader], source: str) ->
 
 
 def sidebar():
+    target_prevalence = None
     with st.sidebar:
         st.header("Data source")
         have_mimic = mimic_available()
@@ -732,6 +745,18 @@ def sidebar():
                 "procedures, and conditions. Harm labels come from planted harm conditions, "
                 "not from the watcher features. No clinical notes."
             )
+            target_prevalence = st.select_slider(
+                "Harm prevalence",
+                options=[0.05, 0.10, 0.15, 0.25, None],
+                value=OIG_PREVENTABLE_HARM_RATE,
+                format_func=lambda v: "as stored (46%)" if v is None else f"{v:.0%}",
+                help=(
+                    "The warehouse plants harm at 46%, which is not a rate any hospital "
+                    "sees and flatters every metric read off it. The OIG report puts "
+                    "preventable harm near 10% of admissions. Thinning drops harm cases "
+                    "only, never duplicates them."
+                ),
+            )
         else:
             st.caption(
                 f"{cohorts[source]} cases read from `core.cases`, source tag "
@@ -773,7 +798,7 @@ def sidebar():
         mode,
         capacity,
         threshold,
-    )
+    ), target_prevalence
 
 
 def main() -> None:
@@ -783,7 +808,7 @@ def main() -> None:
         "ranks cases for human review. Retrospective quality assurance, not a diagnostic tool."
     )
 
-    source, num_cases, harm_ratio, hard_negative_ratio, seed, model_type, queue = sidebar()
+    source, num_cases, harm_ratio, hard_negative_ratio, seed, model_type, queue, target_prevalence = sidebar()
     last_import = st.session_state.get("hospital_ingest")
     if last_import and source == HOSPITAL:
         st.success(
@@ -792,7 +817,7 @@ def main() -> None:
             f"{last_import['in_house']} are still in house (not on the list yet)."
         )
     cases, watcher, reader = load_cases(
-        source, num_cases, harm_ratio, hard_negative_ratio, seed
+        source, num_cases, harm_ratio, hard_negative_ratio, seed, target_prevalence
     )
     if source == HOSPITAL and not cases:
         st.info(
@@ -829,9 +854,15 @@ def main() -> None:
             "In-house stays are kept but not ranked until discharged is filled in."
         )
     elif source == SAFETYHOPS:
+        thinned = (
+            f" Harm thinned to {target_prevalence:.0%} so the rate resembles a real ward; "
+            "the warehouse stores 46%."
+            if target_prevalence
+            else " Harm sits at the stored 46%, which is far above any real ward."
+        )
         st.success(
             f"Scoring **{len(cases)} synthetic encounters** from {origin}. "
-            "Structured signals only; this warehouse has no free-text notes."
+            f"Structured signals only; this warehouse has no free-text notes.{thinned}"
         )
     else:
         st.info(
