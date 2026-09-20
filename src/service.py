@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from src.data.generator import generate_dataset
 from src.data.hospital_extract import HOSPITAL_SOURCE
 from src.data.mimic import load_mimic_cases, mimic_available
+from src.data.prevalence import OIG_PREVENTABLE_HARM_RATE, downsample_to_prevalence
 from src.data.safetyhops import hops_available, load_safetyhops_cases
 from src.data.sql_store import available as sql_available
 from src.data.sql_store import record_review, reviewed_case_ids, read_cases, source_counts, stay_census
@@ -96,7 +97,11 @@ def load_bundle(source: str) -> Tuple[Tuple[PatientCase, ...], StructuredDataWat
         cases = tuple(load_mimic_cases())
         return cases, StructuredDataWatcher(anchor="admission"), None
     if source == SOURCE_SAFETYHOPS:
-        cases = tuple(load_safetyhops_cases())
+        # The warehouse plants harm at ~46%. Left alone it inflates every metric
+        # and contradicts the premise that harm is rare enough to be missed.
+        cases = tuple(
+            downsample_to_prevalence(load_safetyhops_cases(), OIG_PREVENTABLE_HARM_RATE)
+        )
         return cases, StructuredDataWatcher(anchor="admission"), None
     if source == SOURCE_SQL_MIMIC:
         cases = tuple(read_cases("mimic_iv_demo"))

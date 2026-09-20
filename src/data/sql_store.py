@@ -58,6 +58,9 @@ CORE_SCHEMA = "core"
 
 DECISIONS = ("harm", "no_harm", "unclear")
 
+# Availability probes are memoized per (server, database); see `available`.
+_AVAILABILITY_CACHE: Dict[Tuple[str, str], bool] = {}
+
 # Batch size for executemany. Large enough that round trips stop dominating,
 # small enough that a batch's bound buffer stays reasonable.
 BATCH_SIZE = 5000
@@ -132,8 +135,30 @@ def ensure_schema(engine: Engine, schema: str) -> None:
         )
 
 
+def reset_availability_cache() -> None:
+    """Forget prior probes, so a server that has come up is noticed."""
+    _AVAILABILITY_CACHE.clear()
+
+
 def available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) -> bool:
-    """True when the canonical layer can be read right now, like mimic.mimic_available()."""
+    """True when the canonical layer can be read right now, like mimic.mimic_available().
+
+    Probed once per (server, database) and remembered. Callers hit this several
+    times per request and an unreachable server costs a five second timeout
+    each time, so without the cache a missing database both slows every request
+    and buries the log in the same warning. Call `reset_availability_cache()`
+    after starting SQL Server or building the database.
+    """
+    key = (server, database)
+    if key in _AVAILABILITY_CACHE:
+        return _AVAILABILITY_CACHE[key]
+
+    result = _probe(server, database)
+    _AVAILABILITY_CACHE[key] = result
+    return result
+
+
+def _probe(server: str, database: str) -> bool:
     if not _SQL_DEPS_AVAILABLE:
         logger.warning(
             "SafetyNet SQL unavailable: pyodbc/sqlalchemy are not installed. "
@@ -144,22 +169,47 @@ def available(server: str = DEFAULT_SERVER, database: str = DEFAULT_DATABASE) ->
         with pyodbc.connect(
             odbc_connection_string(server, database), timeout=5
         ) as connection:
-            return (
-                connection.execute(
-                    "SELECT OBJECT_ID('core.cases', 'U')"
-                ).fetchone()[0]
+            found = (
+                connection.execute("SELECT OBJECT_ID('core.cases', 'U')").fetchone()[0]
                 is not None
             )
+        if not found:
+            logger.warning(
+                "SafetyNet SQL unavailable: connected to %s/%s but core.cases does not "
+                "exist. Run `python -m scripts.build_safetynet_db` to create it.",
+                server,
+                database,
+            )
+        return found
     except pyodbc.Error as exc:
-        logger.warning(
-            "SafetyNet SQL unavailable: cannot reach %s/%s (%s). Set SAFETYNET_SQL_SERVER "
-            "and SAFETYNET_SQL_DATABASE if your instance or catalog is not the default.",
-            server,
-            database,
-            str(exc).split(";")[0],
-        )
+        logger.warning("SafetyNet SQL unavailable: %s", _diagnose(server, database, exc))
         logger.debug("SafetyNet SQL connection traceback", exc_info=True)
         return False
+
+
+def _diagnose(server: str, database: str, exc: "pyodbc.Error") -> str:
+    """Separate 'no server there' from 'server is fine, database is not'.
+
+    Both surface as a failed connect, but they need opposite fixes, and a login
+    failure reported as an unreachable server sends you hunting for the wrong
+    problem.
+    """
+    sqlstate = exc.args[0] if exc.args else ""
+    detail = str(exc).split(";")[0]
+    if sqlstate == "08001":
+        return (
+            f"cannot reach server {server} ({detail}). Set SAFETYNET_SQL_SERVER to your "
+            "instance name: default instances take the bare machine name, named "
+            "instances take .\\NAME."
+        )
+    if sqlstate in ("28000", "42000"):
+        return (
+            f"reached {server} but could not open database {database} ({detail}). The "
+            "server is running; the database is probably missing. Set "
+            "SAFETYNET_SQL_DATABASE or run `python -m scripts.init_core_db` to create "
+            "the core-only catalog."
+        )
+    return f"cannot open {server}/{database} ({detail})."
 
 
 # -------------------------------------------------------------------------- DDL
