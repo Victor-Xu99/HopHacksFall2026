@@ -19,6 +19,7 @@ from src.service import (
     review_payload,
     trained_model,
 )
+from src import honesty
 
 app = FastAPI(title="SafetyNet API")
 app.add_middleware(
@@ -38,6 +39,11 @@ def health():
 @app.get("/api/sources")
 def sources():
     return {"sources": list_sources()}
+
+
+@app.get("/api/honesty")
+def honesty_story(source: str = Query("safetyhops")):
+    return honesty.as_json(source)
 
 
 @app.get("/api/review")

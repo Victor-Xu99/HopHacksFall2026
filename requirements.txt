@@ -12,3 +12,4 @@ pyodbc
 fastapi
 uvicorn
 python-multipart
+joblib

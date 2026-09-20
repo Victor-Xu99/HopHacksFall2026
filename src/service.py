@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.data.generator import generate_dataset
 from src.engine.lift import compute_lift_curve, lift_multiple, random_baseline
+from src.engine.model_cache import load_cached, save_cached
 from src.data.hospital_extract import HOSPITAL_SOURCE
+from src import honesty
 from src.data.mimic import load_mimic_cases, mimic_available
 from src.data.prevalence import OIG_PREVENTABLE_HARM_RATE, downsample_to_prevalence
 from src.data.safetyhops import hops_available, load_safetyhops_cases
@@ -125,16 +127,23 @@ def load_bundle(source: str) -> Tuple[Tuple[PatientCase, ...], StructuredDataWat
 def trained_model(source: str, model_type: str) -> HarmScoringModel:
     # Hospital extracts have no training labels. Rank them with a model fit on
     # the synthetic cohort, then apply it only to discharged stays.
+    train_source = honesty.train_source_id(source)
+    cached = load_cached(train_source, model_type)
+    if cached is not None:
+        return cached
+
     if source == SOURCE_HOSPITAL:
         train_cases, _, _ = load_bundle(SOURCE_SYNTHETIC)
         watcher = StructuredDataWatcher(anchor="admission")
         model = HarmScoringModel([watcher], model_type=model_type, threshold=0.4)
         model.train(list(train_cases))
-        return model
-    cases, watcher, reader = load_bundle(source)
-    extractors = [watcher] if reader is None else [watcher, reader]
-    model = HarmScoringModel(list(extractors), model_type=model_type, threshold=0.4)
-    model.train(list(cases))
+    else:
+        cases, watcher, reader = load_bundle(source)
+        extractors = [watcher] if reader is None else [watcher, reader]
+        model = HarmScoringModel(list(extractors), model_type=model_type, threshold=0.4)
+        model.train(list(cases))
+
+    save_cached(train_source, model_type, model)
     return model
 
 
@@ -343,6 +352,9 @@ def review_payload(source: str, model_type: str, limit: int) -> Dict[str, Any]:
         "coverage": coverage,
         "weights": weights,
         "model_type": model_type,
+        "train_source": honesty.train_source_id(source),
+        "score_source": source,
+        "honesty": honesty.as_json(source),
         "can_review": can_review,
         "lift_curve": lift_curve_payload,
         "random_curve": random_curve_payload,

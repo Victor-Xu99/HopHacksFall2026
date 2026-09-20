@@ -19,6 +19,7 @@ from src.domain.models import PatientCase, PatientEvent
 from src.engine.model import HarmScoringModel
 from src.engine.nlp_reader import ClinicalNoteReader
 from src.engine.watcher import StructuredDataWatcher
+from src.honesty import as_json as honesty_story
 from src.service import STALE_WAIT_DAYS, waiting_days
 
 st.set_page_config(page_title="SafetyNet", layout="wide")
@@ -803,12 +804,19 @@ def sidebar():
 
 def main() -> None:
     st.title("SafetyNet: Harm Event Triage")
+    source, num_cases, harm_ratio, hard_negative_ratio, seed, model_type, queue, target_prevalence = sidebar()
+    story = honesty_story(
+        "hospital" if source == HOSPITAL else
+        "safetyhops" if source == SAFETYHOPS else
+        "mimic" if source in MIMIC_SOURCES else
+        "synthetic"
+    )
+    chips = " · ".join(f"**{chip['label']}:** {chip['value']}" for chip in story["chips"])
+    st.info(f"{chips}\n\n{story['headline']}")
     st.markdown(
         "Scans completed records for patterns suggesting a harm event went unreported, then "
         "ranks cases for human review. Retrospective quality assurance, not a diagnostic tool."
     )
-
-    source, num_cases, harm_ratio, hard_negative_ratio, seed, model_type, queue, target_prevalence = sidebar()
     last_import = st.session_state.get("hospital_ingest")
     if last_import and source == HOSPITAL:
         st.success(

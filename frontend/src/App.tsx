@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { LiftPoint, Review, ReviewPayload, Source } from "./types";
+import type { HonestyStory, LiftPoint, Review, ReviewPayload, Source } from "./types";
 
 // ---------- Lift / gain curve chart (pure SVG, no dependencies) ----------
 const W = 300, H = 220, PAD = 36;
@@ -56,6 +56,32 @@ type MainTab = "queue" | "import" | "more";
 
 const LIST_LIMIT = 10;
 
+function HonestyBanner({ story }: { story: HonestyStory | null }) {
+  if (!story) {
+    return null;
+  }
+  return (
+    <aside className="honesty" aria-label="How these numbers were made">
+      <div className="source-chips">
+        {story.chips.map((chip) => (
+          <span key={chip.kind} className={`source-chip ${chip.kind}`}>
+            <em>{chip.label}</em>
+            {chip.value}
+          </span>
+        ))}
+      </div>
+      <p className="honesty-headline">{story.headline}</p>
+      <ul>
+        {story.points.map((point) => (
+          <li key={point.title}>
+            <strong>{point.title}.</strong> {point.body}
+          </li>
+        ))}
+      </ul>
+    </aside>
+  );
+}
+
 const shortId = (id: string) => (id.length > 12 ? `${id.slice(0, 8)}...` : id);
 const plain = (text: string) => text.replace(/\*\*/g, "");
 
@@ -94,6 +120,7 @@ export default function App() {
   const [importNote, setImportNote] = useState("");
   const [mappingNote, setMappingNote] = useState("");
   const [tab, setTab] = useState<MainTab>("queue");
+  const [story, setStory] = useState<HonestyStory | null>(null);
 
   useEffect(() => {
     fetch("/api/sources")
@@ -107,9 +134,18 @@ export default function App() {
         }
       })
       .catch(() =>
-        setError("Could not reach the SafetyNet API. Start it with: python -m uvicorn api:app --reload")
+        setError("Could not reach the SafetyNet API. Start it with: python -m scripts.launch")
       );
   }, []);
+
+  useEffect(() => {
+    fetch(`/api/honesty?source=${encodeURIComponent(source)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((body: HonestyStory) => setStory(body))
+      .catch(() => {
+        /* health error is already shown from /api/sources */
+      });
+  }, [source]);
 
   async function refreshSources() {
     const res = await fetch("/api/sources");
@@ -256,6 +292,8 @@ export default function App() {
           </button>
         </nav>
       </div>
+
+      <HonestyBanner story={story} />
 
       {error ? <div className="error">{error}</div> : null}
 

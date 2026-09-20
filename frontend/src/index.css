@@ -165,6 +165,67 @@ button {
   border-bottom-color: var(--teal);
 }
 
+.honesty {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px 18px;
+  margin: 0 0 20px;
+}
+
+.source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.source-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: var(--teal-wash);
+  color: var(--teal);
+}
+
+.source-chip em {
+  font-style: normal;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.source-chip.train {
+  background: #ecfdf5;
+  color: var(--ok);
+}
+
+.source-chip.rate {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.honesty-headline {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.honesty ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.honesty li + li {
+  margin-top: 4px;
+}
+
 .more-page {
   display: grid;
   gap: 18px;

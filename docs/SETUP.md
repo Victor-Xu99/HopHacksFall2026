@@ -129,8 +129,13 @@ missing, so a clean checkout with no dataset still passes.
 
 ## 6. React review dashboard
 
-The Streamlit app is still there. The newer UI is a teal React dashboard that
-talks to a FastAPI wrapper around the same scoring code.
+One command from the repo root:
+
+```bash
+python -m scripts.launch
+```
+
+Or run the two processes yourself. The Streamlit app is still there. The newer UI is a teal React dashboard that talks to a FastAPI wrapper around the same scoring code.
 
 ```bash
 pip install -r requirements.txt

@@ -19,3 +19,12 @@ node_modules/
 dist/
 frontend/node_modules/
 frontend/dist/
+frontend/node_modules/.vite/
+.vite/
+models/
+*.pkl
+*.joblib
+*.log
+.DS_Store
+Thumbs.db
+.cursor/

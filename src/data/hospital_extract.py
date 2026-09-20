@@ -140,7 +140,6 @@ def ingest_extract(
 
 def rank_discharged(engine=None, model_type: str = "logistic") -> Dict[str, object]:
     """Score hospital stays that have a discharge time and no score yet."""
-    from src.data.generator import generate_dataset
     from src.data.sql_store import (
         CaseScore,
         FeatureContribution,
@@ -148,8 +147,7 @@ def rank_discharged(engine=None, model_type: str = "logistic") -> Dict[str, obje
         read_cases,
         write_scores,
     )
-    from src.engine.model import HarmScoringModel
-    from src.engine.watcher import StructuredDataWatcher
+    from src.service import trained_model
 
     source = "hospital"
     pending_ids = set(discharged_unscored_ids(source, engine=engine))
@@ -157,9 +155,7 @@ def rank_discharged(engine=None, model_type: str = "logistic") -> Dict[str, obje
         return {"scored": 0, "case_ids": []}
 
     hospital_cases = [case for case in read_cases(source, engine=engine) if case.patient_id in pending_ids]
-    watcher = StructuredDataWatcher(anchor="admission")
-    model = HarmScoringModel([watcher], model_type=model_type, threshold=0.4)
-    model.train(generate_dataset(num_cases=200, harm_ratio=0.2, hard_negative_ratio=0.3, seed=7))
+    model = trained_model("hospital", model_type)
 
     scores = []
     for case in hospital_cases:

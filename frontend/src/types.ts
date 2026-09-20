@@ -78,6 +78,14 @@ export type LiftPoint = {
   y: number; // fraction of harm events found
 };
 
+export type HonestyStory = {
+  headline: string;
+  points: { title: string; body: string }[];
+  chips: { kind: string; label: string; value: string }[];
+  train_source: string;
+  score_source: string;
+};
+
 export type ReviewPayload = {
   source: string;
   label_name: string;
@@ -96,4 +104,7 @@ export type ReviewPayload = {
   lift_curve: LiftPoint[];
   random_curve: LiftPoint[];
   lift_at_10pct: number | null;
+  train_source?: string;
+  score_source?: string;
+  honesty?: HonestyStory;
 };
